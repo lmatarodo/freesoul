@@ -34,6 +34,9 @@ class DrivingSystemController:
         self.speed = speed
         self.steering_speed = steering_speed
         
+        # 제어 알고리즘 선택
+        self.use_kanayama = True  # True: Kanayama 제어기, False: 기존 방식
+        
         # 시스템 초기화
         self.init_system()
         
@@ -77,6 +80,12 @@ class DrivingSystemController:
             print(f"{mode_str} 모드로 전환되었습니다.")
             print("Space 키를 눌러 주행을 시작하세요.")
 
+    def toggle_control_algorithm(self):
+        """제어 알고리즘 전환 (Kanayama <-> 기존 방식)"""
+        self.use_kanayama = not self.use_kanayama
+        algorithm = "Kanayama 제어기" if self.use_kanayama else "기존 방식"
+        print(f"제어 알고리즘을 {algorithm}로 변경했습니다.")
+
     def process_and_control(self, frame):
         """
         프레임 처리 및 차량 제어
@@ -86,9 +95,9 @@ class DrivingSystemController:
             처리된 이미지
         """
         if self.control_mode == 1:  # Autonomous mode
-            slope, image = self.image_processor.process_frame(frame)
+            steering_angle, image = self.image_processor.process_frame(frame, use_kanayama=self.use_kanayama)
             if self.is_running:
-                self.motor_controller.control_motors(slope, control_mode=1)
+                self.motor_controller.control_motors(steering_angle, control_mode=1)
             return image
         else:  # Manual mode
             if self.is_running:
@@ -136,6 +145,7 @@ class DrivingSystemController:
         print("\n키보드 제어 안내:")
         print("Space: 주행 시작/정지")
         print("1/2: 자율주행/수동주행 모드 전환")
+        print("K: 제어 알고리즘 전환 (Kanayama <-> 기존 방식)")
         if self.control_mode == 2:
             print("\n수동 주행 제어:")
             print("W/S: 전진/후진")
@@ -165,6 +175,10 @@ class DrivingSystemController:
                             print("R: 긴급 정지")
                     time.sleep(0.3)  # 디바운싱
                 
+                elif keyboard.is_pressed('k'):
+                    time.sleep(0.3)  # 디바운싱
+                    self.toggle_control_algorithm()
+                
                 if keyboard.is_pressed('q'):
                     print("\n프로그램을 종료합니다.")
                     break
@@ -181,7 +195,14 @@ class DrivingSystemController:
                 # 상태 표시
                 mode_text = "모드: " + ("자율주행" if self.control_mode == 1 else "수동주행")
                 status_text = "상태: " + ("주행중" if self.is_running else "정지")
+                algorithm_text = "알고리즘: " + ("Kanayama" if self.use_kanayama else "기존 방식")
                 
+                # 화면에 상태 정보 표시
+                cv2.putText(processed_image, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(processed_image, status_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(processed_image, algorithm_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                cv2.imshow("Processed Image", processed_image)
 
         except KeyboardInterrupt:
             print("\n사용자에 의해 중지되었습니다.")

@@ -22,4 +22,27 @@ anchor_list = [10, 14, 23, 27, 37, 58, 81, 82, 135, 169, 344, 319]
 anchors = np.array(anchor_list).reshape(-1, 2)
 classes_path = "../xmodel/lane_class.txt"
 
+# Kanayama 제어기 파라미터
+KANAYAMA_CONFIG = {
+    'K_y': 1.0,        # 횡방향 오차 게인
+    'K_phi': 3.0,      # 방향각 오차 게인
+    'L': 0.5,          # 휠베이스 (m)
+    'lane_width': 3.5, # 차선 폭 (m)
+    'v_r': 30.0        # 기준 속도
+}
+
+# 히스토리 관리 설정
+HISTORY_CONFIG = {
+    'max_history_size': 10,      # 최대 히스토리 크기
+    'avg_window_size': 5,        # 평균 계산에 사용할 프레임 수
+    'max_no_lane_frames': 5,     # 최대 차선 미검출 프레임 수
+    'default_steering_angle': 0.0,  # 기본 조향각 (직진)
+    'smoothing_factor': 0.8      # 스무딩 팩터 (0~1, 높을수록 부드러움)
+}
+
+# 기존 제어 파라미터 (하위 호환성)
+k_p = 30/25  # 속도 기반 비례 게인
+k_para = 20
+k_lateral = 5
+
 
