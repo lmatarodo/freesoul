@@ -84,7 +84,7 @@ def convert_video_to_birdview_frames(video_path, output_dir="birdview_frames",
     
     print(f"\n변환 시작 (프레임 {start_frame} ~ {end_frame})...")
     
-    save_interval = int(fps * 0.1)  # 0.5초 간격 (예: 30fps면 15)
+    save_interval = int(fps * 0.5)  # 0.5초 간격 (예: 30fps면 15)
     
     while frame_count < end_frame:
         ret, frame = cap.read()

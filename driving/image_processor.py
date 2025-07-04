@@ -16,13 +16,71 @@ from collections import deque
 from yolo_utils import pre_process, evaluate
 from config import KANAYAMA_CONFIG, HISTORY_CONFIG
 
+def slide_window_in_roi(binary, box, n_win=15, margin=30, minpix=10):
+    """
+    debugging/visualize.py의 slide_window_search_roi와 동일하게 슬라이딩 윈도우 적용
+    Args:
+        binary: 2D np.array (전체 BEV 이진화 이미지)
+        box: (y1, x1, y2, x2) – 전체 이미지 좌표계
+        n_win: 윈도우 개수 (15)
+        margin: 윈도우 마진 (30)
+        minpix: 최소 픽셀 수 (10)
+    Returns:
+        fit: (slope, intercept), lane_pts: (x, y) 리스트
+    """
+    y1, x1, y2, x2 = box
+    roi = binary[int(y1):int(y2), int(x1):int(x2)]
+    if roi.size == 0:
+        return None, None
+
+    window_height = roi.shape[0] // n_win
+    nonzero = roi.nonzero()
+    nonzero_y, nonzero_x = nonzero
+    left_inds = []
+
+    # ROI 내부에서 히스토그램으로 초기 좌표 찾기
+    hist = np.sum(roi[roi.shape[0]//2:,:], axis=0)
+    if np.max(hist) > 0:
+        current_x = np.argmax(hist)
+    else:
+        current_x = roi.shape[1] // 2
+
+    for w in range(n_win):
+        y_low = roi.shape[0] - (w+1)*window_height
+        y_high = roi.shape[0] - w*window_height
+        x_low = max(0, current_x-margin)
+        x_high = min(roi.shape[1], current_x+margin)
+
+        good_inds = ((nonzero_y>=y_low)&(nonzero_y<y_high)&(nonzero_x>=x_low)&(nonzero_x<x_high)).nonzero()[0]
+        if len(good_inds) > minpix:
+            current_x = int(nonzero_x[good_inds].mean())
+            left_inds.append(good_inds)
+
+    if left_inds:
+        left_inds = np.concatenate(left_inds)
+        leftx, lefty = nonzero_x[left_inds], nonzero_y[left_inds]
+        # ROI 좌표를 전체 이미지 좌표로 변환
+        leftx_global = leftx + int(x1)
+        lefty_global = lefty + int(y1)
+        if len(leftx_global) >= 2:
+            left_fit = np.polyfit(lefty_global, leftx_global, 1)
+            return left_fit, (leftx_global, lefty_global)
+    return None, None
+
 class LaneInfo:
     """차선 정보를 저장하는 클래스"""
     def __init__(self):
         self.left_x = 130  # 왼쪽 차선 x좌표 (기본값: 차선 없음)
         self.right_x = 130  # 오른쪽 차선 x좌표 (기본값: 차선 없음)
         self.left_slope = 0.0  # 왼쪽 차선 기울기
+        self.left_intercept = 0.0  # 왼쪽 차선 y절편
         self.right_slope = 0.0  # 오른쪽 차선 기울기
+        self.right_intercept = 0.0  # 오른쪽 차선 y절편
+        # fitLine 파라미터 추가
+        self.left_params = None   # (vx, vy, x0, y0)
+        self.right_params = None  # (vx, vy, x0, y0)
+        self.left_points = None  # 슬라이딩 윈도우 결과 저장용
+        self.right_points = None
 
 class ImageProcessor:
     def __init__(self, dpu, classes_path, anchors):
@@ -125,116 +183,166 @@ class ImageProcessor:
         
         return masked
 
-    def extract_lane_pixels(self, gray_img, box):
-        """바운딩 박스 내의 차선 픽셀들을 추출 (개선된 방식)"""
+    def create_binary_image(self, gray_img):
+        """HSV + 그레이스케일 조합으로 이진화 이미지 생성 (개선된 임계값)"""
+        # 그레이스케일을 BGR로 변환 (HSV 변환을 위해)
+        if len(gray_img.shape) == 2:
+            bgr_img = cv2.cvtColor(gray_img, cv2.COLOR_GRAY2BGR)
+        else:
+            bgr_img = gray_img
+        
+        # 1) HSV로 흰색만 뽑기 (더 관대한 임계값)
+        hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+        lower_white = np.array([0, 0, 120])      # V 채널을 150 → 120으로 완화
+        upper_white = np.array([180, 80, 255])   # S 채널을 60 → 80으로 완화
+        mask_hsv = cv2.inRange(hsv, lower_white, upper_white)
+
+        # 2) 그레이스케일 적응적 임계값 (더 강건한 방법)
+        # 기존 고정 임계값 대신 적응적 임계값 사용
+        mask_adaptive = cv2.adaptiveThreshold(gray_img, 255, 
+                                            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                            cv2.THRESH_BINARY, 11, 2)
+        
+        # 추가로 고정 임계값도 백업으로 사용 (더 낮은 임계값)
+        _, mask_gray = cv2.threshold(gray_img, 120, 255, cv2.THRESH_BINARY)  # 150 → 120으로 완화
+
+        # 3) 세 마스크 결합 (더 강건한 검출)
+        mask = cv2.bitwise_or(mask_hsv, mask_adaptive)
+        mask = cv2.bitwise_or(mask, mask_gray)
+
+        # 4) 모폴로지로 노이즈 정리 (더 부드러운 연산)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)  # 작은 구멍 메우기
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)   # 작은 노이즈 제거
+        
+        return mask
+
+    def extract_lane_pixels_improved(self, gray_img, box):
+        """개선된 차선 픽셀 추출 (개선된 임계값)"""
         y1, x1, y2, x2 = box
         
         # 바운딩 박스 영역 추출
         roi = gray_img[int(y1):int(y2), int(x1):int(x2)]
         
-        # 참고 코드와 동일한 이진화 임계값 사용
-        _, binary = cv2.threshold(roi, 170, 255, cv2.THRESH_BINARY)
+        if roi.size == 0:
+            return []
         
-        # 차선 픽셀들의 좌표 찾기 (참고 코드와 동일한 방식)
-        nonzero = binary.nonzero()
-        nonzero_y = np.array(nonzero[0])
-        nonzero_x = np.array(nonzero[1])
+        # BGR 변환 (HSV를 위해)
+        if len(roi.shape) == 2:
+            roi_bgr = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+        else:
+            roi_bgr = roi
         
-        # 원본 이미지 좌표로 변환
-        lane_pixels = []
-        for i in range(len(nonzero_y)):
-            orig_y = int(y1) + nonzero_y[i]
-            orig_x = int(x1) + nonzero_x[i]
-            lane_pixels.append((orig_y, orig_x))
-        
-        return lane_pixels
+        # 1) 적응적 HSV 필터링 (더 관대한 범위)
+        hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+        lower_white = np.array([0, 0, 120])      # V 채널을 120으로 완화
+        upper_white = np.array([180, 80, 255])   # S 채널을 80으로 완화
+        mask_hsv = cv2.inRange(hsv, lower_white, upper_white)
 
-    def extract_lane_info(self, xyxy_results, classes_results, processed_img):
-        """바운딩 박스에서 좌우 차선 정보를 추출 (픽셀 기반 직선 피팅)"""
-        lane_info = LaneInfo()
+        # 2) 그레이스케일 적응적 임계값
+        gray_roi = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        mask_adaptive = cv2.adaptiveThreshold(gray_roi, 255, 
+                                            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                            cv2.THRESH_BINARY, 11, 2)
+
+        # 3) 세 마스크 결합
+        mask = cv2.bitwise_or(mask_hsv, mask_adaptive)
         
+        # 추가로 고정 임계값도 백업으로 사용
+        _, mask_gray = cv2.threshold(gray_roi, 120, 255, cv2.THRESH_BINARY)  # 150 → 120으로 완화
+        mask = cv2.bitwise_or(mask, mask_gray)
+
+        # 4) 부드러운 모폴로지 연산 (더 작은 커널)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        
+        # 5) 픽셀 좌표 추출
+        pts = cv2.findNonZero(mask)
+        if pts is None or len(pts) < 5:  # 최소 픽셀 수를 5로 낮춤
+            return []
+        
+        pts = pts.reshape(-1, 2)  # Nx2, (x, y) 순서
+        
+        # ROI 좌표계를 전체 이미지 좌표계로 변환
+        pts[:, 0] += int(x1)  # x 좌표
+        pts[:, 1] += int(y1)  # y 좌표
+        
+        return pts
+
+    def extract_lane_info_improved(self, xyxy_results, classes_results, processed_img):
+        """debugging/visualize.py의 process_roi와 동일하게 ROI 내 이진화, 슬라이딩 윈도우, 직선 피팅 적용"""
+        lane_info = LaneInfo()
         if len(xyxy_results) == 0:
             return lane_info
-        
-        left_lanes = []
-        right_lanes = []
-        
-        # 이미지를 그레이스케일로 변환 (이미 처리된 이미지 사용)
+        # 그레이스케일 변환
         if len(processed_img.shape) == 3:
             gray_img = cv2.cvtColor(processed_img, cv2.COLOR_BGR2GRAY)
         else:
             gray_img = processed_img
-        
+        h, w = gray_img.shape[:2]
+        left_lines = []
+        right_lines = []
         for i, box in enumerate(xyxy_results):
-            y1, x1, y2, x2 = box
-            
-            # 바운딩 박스 내의 차선 픽셀들을 찾기
-            lane_pixels = self.extract_lane_pixels(gray_img, box)
-            
-            if len(lane_pixels) < 10:  # 최소 픽셀 수 확인
+            y1, x1, y2, x2 = [int(v) for v in box]
+            roi = processed_img[y1:y2, x1:x2]
+            # === debugging/visualize.py의 process_roi와 동일하게 ===
+            blurred = cv2.GaussianBlur(roi, (5,5), 1)
+            gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+            _, binary = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
+            # ROI 하단 20% 마스킹
+            h_roi = binary.shape[0]
+            binary[h_roi*80//100:, :] = 0
+            # 전체 프레임 좌표에 합성은 생략 (필요시 추가)
+            # 슬라이딩 윈도우 적용
+            fit, pts = slide_window_in_roi(binary, (0, 0, binary.shape[0], binary.shape[1]), n_win=15, margin=30, minpix=10)
+            if fit is not None and pts is not None:
+                slope, intercept = fit
+                xs, ys = pts
+                # 이미지 하단(y=h-1)에서의 x 좌표 계산
+                x_bottom = slope * (h - 1) + intercept
+                line_info = {
+                    'x_bottom': x_bottom,
+                    'slope': slope,
+                    'intercept': intercept,
+                    'vx': 0, 'vy': 0, 'x0': 0, 'y0': 0,
+                    'pixel_count': len(xs),
+                    'points': (xs, ys)
+                }
+            else:
                 continue
-            
-            # 픽셀 좌표를 y, x 형태로 변환 (참고 코드와 동일)
-            pixels_y = [p[0] for p in lane_pixels]  # y 좌표
-            pixels_x = [p[1] for p in lane_pixels]  # x 좌표
-            
-            # 직선 피팅 수행 (참고 코드와 동일한 방식)
-            try:
-                fit = np.polyfit(pixels_y, pixels_x, 1)  # x = slope * y + intercept
-                slope = fit[0]  # 기울기
-                intercept = fit[1]  # y절편
-                
-                # 차선의 중심점 계산 (이미지 하단 y=255에서의 x 좌표)
-                # 참고 코드와 동일한 방식으로 계산
-                center_x = slope * 255 + intercept
-                
-                # 클래스 정보를 기반으로 좌우 차선 분류
-                class_id = classes_results[i] if i < len(classes_results) else 0
-                class_name = self.class_names[class_id] if class_id < len(self.class_names) else ""
-                
-                if "left" in class_name.lower():
-                    left_lanes.append((center_x, slope))
-                elif "right" in class_name.lower():
-                    right_lanes.append((center_x, slope))
+            # 클래스 기반 좌우 분류
+            class_id = classes_results[i] if i < len(classes_results) else 0
+            class_name = self.class_names[class_id] if class_id < len(self.class_names) else ""
+            if "left" in class_name.lower():
+                left_lines.append(line_info)
+            elif "right" in class_name.lower():
+                right_lines.append(line_info)
+            else:
+                image_center_x = w / 2
+                if x_bottom < image_center_x:
+                    left_lines.append(line_info)
                 else:
-                    # 클래스 이름이 명확하지 않은 경우, 기존 방식으로 분류 (fallback)
-                    image_center_x = 128
-                    if center_x < image_center_x:
-                        left_lanes.append((center_x, slope))
-                    else:
-                        right_lanes.append((center_x, slope))
-                        
-            except (np.RankWarning, ValueError):
-                # 직선 피팅 실패 시 기존 방식 사용
-                center_x = (x1 + x2) / 2
-                slope = (x2 - x1) / (y2 - y1) if (y2 - y1) != 0 else 0
-                
-                class_id = classes_results[i] if i < len(classes_results) else 0
-                class_name = self.class_names[class_id] if class_id < len(self.class_names) else ""
-                
-                if "left" in class_name.lower():
-                    left_lanes.append((center_x, slope))
-                elif "right" in class_name.lower():
-                    right_lanes.append((center_x, slope))
-        
-        # 왼쪽 차선 정보 설정
-        if left_lanes:
-            # 가장 오른쪽에 있는 왼쪽 차선 선택
-            left_lanes.sort(key=lambda x: x[0], reverse=True)
-            lane_info.left_x = left_lanes[0][0]
-            lane_info.left_slope = left_lanes[0][1]
-        
-        # 오른쪽 차선 정보 설정
-        if right_lanes:
-            # 가장 왼쪽에 있는 오른쪽 차선 선택
-            right_lanes.sort(key=lambda x: x[0])
-            lane_info.right_x = right_lanes[0][0]
-            lane_info.right_slope = right_lanes[0][1]
-        
+                    right_lines.append(line_info)
+        if left_lines:
+            best_left = max(left_lines, key=lambda x: x['pixel_count'])
+            lane_info.left_x = best_left['x_bottom']
+            lane_info.left_slope = best_left['slope']
+            lane_info.left_intercept = best_left['intercept']
+            lane_info.left_params = (best_left['vx'], best_left['vy'], best_left['x0'], best_left['y0'])
+            lane_info.left_points = best_left['points']
+        if right_lines:
+            best_right = max(right_lines, key=lambda x: x['pixel_count'])
+            lane_info.right_x = best_right['x_bottom']
+            lane_info.right_slope = best_right['slope']
+            lane_info.right_intercept = best_right['intercept']
+            lane_info.right_params = (best_right['vx'], best_right['vy'], best_right['x0'], best_right['y0'])
+            lane_info.right_points = best_right['points']
         return lane_info
+
     
     def kanayama_control(self, lane_info):
-        """Kanayama 제어기를 사용한 조향각 계산 (히스토리 기능 포함)"""
+        """debugging/visualize.py와 동일한 Kanayama 제어기"""
+        # 1) 데이터 없으면 그대로
         if lane_info.left_x == 130 and lane_info.right_x == 130:
             print("차선을 찾을 수 없습니다.")
             # 히스토리에서 평균값 사용
@@ -245,34 +353,43 @@ class ImageProcessor:
             else:
                 return self.default_steering_angle, self.v_r
         
-        # 횡방향 오차와 방향각 오차 계산
-        if lane_info.left_x == 130:
-            # 왼쪽 차선이 없을 때
-            lateral_err = -(0.5 - (lane_info.right_x / 150.0)) * self.lane_width
-            heading_err = lane_info.right_slope
-        elif lane_info.right_x == 130:
-            # 오른쪽 차선이 없을 때
-            lateral_err = (0.5 - (lane_info.left_x / 150.0)) * self.lane_width
-            heading_err = lane_info.left_slope
+        # 이미지 크기 (256x256으로 리사이즈됨)
+        frame_width = 256
+        lane_width_m = 3.5  # debugging/visualize.py와 동일한 차로 폭
+        Fix_Speed = self.v_r
+        
+        # 2) 픽셀 단위 차로 폭 & 픽셀당 미터 변환 계수
+        lane_pixel_width = lane_info.right_x - lane_info.left_x
+        if lane_pixel_width > 0:
+            pix2m = lane_pixel_width / lane_width_m
         else:
-            # 양쪽 차선이 모두 있을 때
-            lateral_err = -(lane_info.left_x / (lane_info.left_x + lane_info.right_x) - 0.5) * self.lane_width
-            heading_err = 0.5 * (lane_info.left_slope + lane_info.right_slope)
+            pix2m = frame_width / lane_width_m  # fallback
+
+        # 3) 횡방향 오차: 차량 중앙(pixel) - 차로 중앙(pixel) → m 단위
+        image_cx = frame_width / 2.0
+        lane_cx = (lane_info.left_x + lane_info.right_x) / 2.0
+        lateral_err = (image_cx - lane_cx) / pix2m
+
+        # 4) 헤딩 오차 (차선 기울기 평균)
+        heading_err = -0.5 * (lane_info.left_slope + lane_info.right_slope)
+
+        # 5) Kanayama 제어식 (debugging/visualize.py와 동일한 파라미터)
+        K_y, K_phi, L = 0.3, 0.9, 0.5
+        v_r = Fix_Speed
+        v = v_r * (math.cos(heading_err))**2
+        w = v_r * (K_y * lateral_err + K_phi * math.sin(heading_err))
+        delta = math.atan2(w * L, v)
+
+        # 6) 픽셀→도 단위 보정 (k_p) - debugging/visualize.py와 동일
+        steering = math.degrees(delta) * (Fix_Speed/25)
+        steering = max(min(steering, 50.0), -50.0)
         
-        heading_err *= -1  # 방향 보정
+        # 디버깅 정보 출력
+        print(f"Lateral error: {lateral_err:.3f}m, Heading error: {math.degrees(heading_err):.1f}°")
+        print(f"Lane center: {lane_cx:.1f}, Image center: {image_cx:.1f}")
+        print(f"Steering: {steering:.2f}°, Speed: {v:.1f}")
         
-        # 각속도 계산
-        v = self.v_r * (math.cos(heading_err))**2
-        w = self.v_r * (self.K_y * lateral_err + self.K_phi * math.sin(heading_err))
-        
-        # 조향각 계산 (라디안 -> 각도)
-        delta = math.atan2(w * self.L, v)
-        steering_angle = math.degrees(delta)
-        
-        # 조향각 제한 (-50 ~ 50도)
-        steering_angle = max(min(steering_angle, 50.0), -50.0)
-        
-        return steering_angle, v
+        return steering, v
 
     def detect_lane_center_x(self, xyxy_results):
         """기존 방식: 가장 오른쪽 차선의 중심점 반환 (하위 호환성 유지)"""
@@ -394,9 +511,42 @@ class ImageProcessor:
             bottom_right = (int(box[3]), int(box[2]))
             cv2.rectangle(img, top_left, bottom_right, (0, 255, 0), 2)
 
+        # === 바운딩 박스 기반 차선(직선) 방정식 시각화 추가 ===
+        lane_info = self.extract_lane_info_improved(boxes, classes, img)
+        h, w = img.shape[:2]
+        # 왼쪽 차선 직선 그리기 (slope/intercept 방식)
+        if lane_info.left_slope != 0.0:
+            try:
+                y_bot, y_top = h, 100
+                x_bot = lane_info.left_slope * y_bot + lane_info.left_intercept
+                x_top = lane_info.left_slope * y_top + lane_info.left_intercept
+                cv2.line(img,
+                         (int(round(x_bot)), y_bot),
+                         (int(round(x_top)), y_top),
+                         (255, 0, 0), 2)  # 파란색
+            except:
+                pass
+                
+        # 오른쪽 차선 직선 그리기 (slope/intercept 방식)
+        if lane_info.right_slope != 0.0:
+            try:
+                y_bot, y_top = h, 100
+                x_bot = lane_info.right_slope * y_bot + lane_info.right_intercept
+                x_top = lane_info.right_slope * y_top + lane_info.right_intercept
+                cv2.line(img,
+                         (int(round(x_bot)), y_bot),
+                         (int(round(x_top)), y_top),
+                         (0, 0, 255), 2)  # 빨간색
+            except:
+                pass
+        # 기울기 등 텍스트로 표시
+        cv2.putText(img, f"Left slope: {lane_info.left_slope:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        cv2.putText(img, f"Right slope: {lane_info.right_slope:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        # === 끝 ===
+
         if use_kanayama:
             # Kanayama 제어기 사용
-            lane_info = self.extract_lane_info(boxes, classes, img)
+            lane_info = self.extract_lane_info_improved(boxes, classes, img)
             
             # 기본 조향각 계산
             base_steering_angle, speed = self.kanayama_control(lane_info)
@@ -429,4 +579,8 @@ class ImageProcessor:
                 self.add_steering_to_history(steering_angle)
                 speed = self.v_r
         
+        # === 최종 주행각도 영상에 표시 ===
+        cv2.putText(img, f"Steering Angle: {steering_angle:.2f}°", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
+        # === 끝 ===
+
         return steering_angle, img
