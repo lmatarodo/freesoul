@@ -37,7 +37,7 @@ HISTORY_CONFIG = {
     'avg_window_size': 5,        # 평균 계산에 사용할 프레임 수
     'max_no_lane_frames': 5,     # 최대 차선 미검출 프레임 수
     'default_steering_angle': 0.0,  # 기본 조향각 (직진)
-    'smoothing_factor': 0.8      # 스무딩 팩터 (0~1, 높을수록 부드러움)
+    'smoothing_factor': 0.2      # 스무딩 팩터 (0~1, 높을수록 부드러움)
 }
 
 # 기존 제어 파라미터 (하위 호환성)

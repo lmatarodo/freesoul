@@ -70,8 +70,8 @@ def slide_window_in_roi(binary, box, n_win=15, margin=30, minpix=10):
 class LaneInfo:
     """차선 정보를 저장하는 클래스"""
     def __init__(self):
-        self.left_x = 130  # 왼쪽 차선 x좌표 (기본값: 차선 없음)
-        self.right_x = 130  # 오른쪽 차선 x좌표 (기본값: 차선 없음)
+        self.left_x = 128  # 왼쪽 차선 x좌표 (기본값: 차선 없음)
+        self.right_x = 128  # 오른쪽 차선 x좌표 (기본값: 차선 없음)
         self.left_slope = 0.0  # 왼쪽 차선 기울기
         self.left_intercept = 0.0  # 왼쪽 차선 y절편
         self.right_slope = 0.0  # 오른쪽 차선 기울기
@@ -217,6 +217,32 @@ class ImageProcessor:
         
         return mask
 
+    def generate_left_lane_from_right(self, right_x, right_slope, right_intercept, frame_width, lane_width_pixels=180):
+        """
+        오른쪽 차선을 기준으로 왼쪽 차선을 생성
+        Args:
+            right_x: 오른쪽 차선의 x 좌표
+            right_slope: 오른쪽 차선의 기울기
+            right_intercept: 오른쪽 차선의 y절편
+            frame_width: 프레임 너비
+            lane_width_pixels: 차선 간격 (픽셀)
+        Returns:
+            left_x, left_slope, left_intercept: 생성된 왼쪽 차선 정보
+        """
+        # 왼쪽 차선은 오른쪽 차선에서 일정 간격만큼 왼쪽에 위치
+        left_x = right_x - lane_width_pixels
+        
+        # 기울기는 오른쪽 차선과 동일 (평행한 차선)
+        left_slope = right_slope
+        
+        # y절편도 동일한 간격만큼 조정
+        left_intercept = right_intercept - lane_width_pixels
+        
+        # 프레임 범위 내로 제한
+        left_x = max(0, min(left_x, frame_width - 1))
+        
+        return left_x, left_slope, left_intercept
+
     def extract_lane_pixels_improved(self, gray_img, box):
         """개선된 차선 픽셀 추출 (개선된 임계값)"""
         y1, x1, y2, x2 = box
@@ -343,7 +369,7 @@ class ImageProcessor:
     def kanayama_control(self, lane_info):
         """debugging/visualize.py와 동일한 Kanayama 제어기"""
         # 1) 데이터 없으면 그대로
-        if lane_info.left_x == 130 and lane_info.right_x == 130:
+        if lane_info.left_x == 128 and lane_info.right_x == 128:
             print("차선을 찾을 수 없습니다.")
             # 히스토리에서 평균값 사용
             if len(self.steering_history) > 0:
@@ -368,7 +394,7 @@ class ImageProcessor:
         # 3) 횡방향 오차: 차량 중앙(pixel) - 차로 중앙(pixel) → m 단위
         image_cx = frame_width / 2.0
         lane_cx = (lane_info.left_x + lane_info.right_x) / 2.0
-        lateral_err = (image_cx - lane_cx) / pix2m
+        lateral_err = (lane_cx - image_cx) / pix2m
 
         # 4) 헤딩 오차 (차선 기울기 평균)
         heading_err = -0.5 * (lane_info.left_slope + lane_info.right_slope)
@@ -444,7 +470,7 @@ class ImageProcessor:
     def should_use_history(self, lane_info):
         """히스토리 사용 여부 결정"""
         # 양쪽 차선이 모두 보이지 않는 경우
-        if lane_info.left_x == 130 and lane_info.right_x == 130:
+        if lane_info.left_x == 128 and lane_info.right_x == 128:
             self.no_lane_detection_count += 1
             return True
         else:
@@ -514,6 +540,32 @@ class ImageProcessor:
         # === 바운딩 박스 기반 차선(직선) 방정식 시각화 추가 ===
         lane_info = self.extract_lane_info_improved(boxes, classes, img)
         h, w = img.shape[:2]
+        
+        # 왼쪽 차선이 검출되지 않았을 때 오른쪽 차선을 기준으로 왼쪽 차선 생성
+        if lane_info.left_x == 128 and lane_info.right_x != 128:
+            left_x, left_slope, left_intercept = self.generate_left_lane_from_right(
+                lane_info.right_x, lane_info.right_slope, lane_info.right_intercept, w, lane_width_pixels=180
+            )
+            lane_info.left_x = left_x
+            lane_info.left_slope = left_slope
+            lane_info.left_intercept = left_intercept
+            print(f"왼쪽 차선 미검출, 오른쪽 차선 기준으로 생성: Left X={lane_info.left_x:.1f}, Slope={lane_info.left_slope:.3f}")
+        
+        # 오른쪽 차선이 검출되지 않았을 때 왼쪽 차선을 기준으로 오른쪽 차선 생성
+        elif lane_info.right_x == 128 and lane_info.left_x != 128:
+            # 왼쪽 차선을 기준으로 오른쪽 차선 생성 (180픽셀 오른쪽)
+            right_x = lane_info.left_x + 180
+            right_slope = lane_info.left_slope  # 기울기는 동일
+            right_intercept = lane_info.left_intercept + 180  # y절편도 동일한 간격만큼 조정
+            
+            # 프레임 범위 내로 제한
+            right_x = max(0, min(right_x, w - 1))
+            
+            lane_info.right_x = right_x
+            lane_info.right_slope = right_slope
+            lane_info.right_intercept = right_intercept
+            print(f"오른쪽 차선 미검출, 왼쪽 차선 기준으로 생성: Right X={lane_info.right_x:.1f}, Slope={lane_info.right_slope:.3f}")
+        
         # 왼쪽 차선 직선 그리기 (slope/intercept 방식)
         if lane_info.left_slope != 0.0:
             try:
