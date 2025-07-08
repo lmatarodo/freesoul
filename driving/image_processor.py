@@ -531,8 +531,12 @@ class ImageProcessor:
                   [round(w * 0.7), h], [round(w * 0.3), h]]
         src_mat = [[250, 316], [380, 316], [450, 476], [200, 476]]
         
+        # BEV 변환
         bird_img = self.bird_convert(img, srcmat=src_mat, dstmat=dst_mat)
         roi_image = self.roi_rectangle_below(bird_img, cutting_idx=300)
+        
+        # 원본 BEV 영상 저장 (바운딩 박스 그리기 전)
+        original_bev = roi_image.copy()
         
         img = cv2.resize(roi_image, (256, 256))
         image_size = img.shape[:2]
@@ -661,4 +665,43 @@ class ImageProcessor:
         cv2.putText(img, f"Speed: {calculated_speed:.1f} m/s", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         # === 끝 ===
 
-        return steering_angle, calculated_speed, img
+        # 바운딩 박스 정보를 BEV 좌표계로 변환 (이미 BEV 좌표계에 있음)
+        bev_boxes = []
+        if len(boxes) > 0:
+            # 이미 BEV 좌표계에서 예측된 박스이므로 단순히 ROI 기준으로 좌표 조정
+            for i, box in enumerate(boxes):
+                x1, y1, x2, y2 = box[1], box[0], box[3], box[2]
+                
+                # 256x256 리사이즈된 이미지에서 원본 BEV ROI 크기로 스케일 조정
+                # 원본 BEV ROI 크기: (w, h-300) = (w, h-300)
+                # 리사이즈된 크기: (256, 256)
+                scale_x = original_bev.shape[1] / 256.0
+                scale_y = original_bev.shape[0] / 256.0
+                
+                # 스케일 조정된 좌표
+                bev_x1 = x1 * scale_x
+                bev_y1 = y1 * scale_y
+                bev_x2 = x2 * scale_x
+                bev_y2 = y2 * scale_y
+                
+                # ROI 영역 내에 있는 박스만 포함
+                if bev_y2 > 0 and bev_y1 < original_bev.shape[0]:  # ROI 영역 내
+                    bev_boxes.append({
+                        'x1': int(bev_x1),
+                        'y1': int(bev_y1),
+                        'x2': int(bev_x2),
+                        'y2': int(bev_y2),
+                        'class': classes[i] if i < len(classes) else 'unknown',
+                        'score': scores[i] if i < len(scores) else 0.0
+                    })
+
+        # 결과를 딕셔너리로 반환
+        return {
+            'steering_angle': steering_angle,
+            'speed': calculated_speed,
+            'original': img,  # 기존 처리된 이미지
+            'bev': original_bev,  # BEV 변환된 원본 영상
+            'bev_boxes': bev_boxes,  # BEV 좌표계의 바운딩 박스
+            'lane_info': lane_info,  # 차선 정보
+            'processing_time': end_time - start_time
+        }

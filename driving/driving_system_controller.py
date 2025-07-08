@@ -1,13 +1,37 @@
+#!/usr/bin/env python3
+import cv2
+import numpy as np
+import time
+import keyboard
+from threading import Lock
+import matplotlib.pyplot as plt
+import os
+
+# Jupyter 환경 감지
+def is_jupyter_environment():
+    """Jupyter 환경인지 확인"""
+    try:
+        # Jupyter 환경에서 실행 중인지 확인
+        shell = get_ipython().__class__.__name__
+        if shell == 'ZMQInteractiveShell':  # Jupyter notebook
+            return True
+        elif shell == 'TerminalInteractiveShell':  # IPython terminal
+            return False
+        else:
+            return False
+    except NameError:
+        return False
+
+# matplotlib 설정 (Jupyter 환경에서만)
+if is_jupyter_environment():
+    plt.ion()  # 인터랙티브 모드 활성화
+    print("Jupyter 환경에서 실행 중입니다. matplotlib을 사용하여 이미지를 표시합니다.")
+
 # Copyright (c) 2024 Sungkyunkwan University AutomationLab
 #
 # Authors:
 # - Gyuhyeon Hwang <rbgus7080@g.skku.edu>, Hobin Oh <hobin0676@daum.net>, Minkwan Choi <arbong97@naver.com>, Hyeonjin Sim <nufxwms@naver.com>
 # - url: https://micro.skku.ac.kr/micro/index.do
-
-import cv2
-import time
-import keyboard
-from threading import Lock
 
 from image_processor import ImageProcessor
 from motor_controller import MotorController
@@ -92,10 +116,20 @@ class DrivingSystemController:
         Args:
             frame: 처리할 비디오 프레임
         Returns:
-            처리된 이미지
+            처리된 이미지와 추가 정보
         """
         if self.control_mode == 1:  # Autonomous mode
-            steering_angle, calculated_speed, image = self.image_processor.process_frame(frame, use_kanayama=self.use_kanayama)
+            result = self.image_processor.process_frame(frame, use_kanayama=self.use_kanayama)
+            
+            # 새로운 반환값 구조에서 정보 추출
+            steering_angle = result['steering_angle']
+            calculated_speed = result['speed']
+            processed_image = result['original']
+            bev_image = result['bev']
+            bev_boxes = result['bev_boxes']
+            lane_info = result['lane_info']
+            processing_time = result['processing_time']
+            
             if self.is_running:
                 # Kanayama에서 계산된 속도를 실제 모터에 적용
                 if self.use_kanayama:
@@ -116,11 +150,29 @@ class DrivingSystemController:
                 
                 # 조향 제어
                 self.motor_controller.control_motors(steering_angle, control_mode=1)
-            return image
+            
+            # 시각화를 위한 정보 반환
+            return {
+                'processed_image': processed_image,
+                'bev_image': bev_image,
+                'bev_boxes': bev_boxes,
+                'lane_info': lane_info,
+                'steering_angle': steering_angle,
+                'speed': calculated_speed,
+                'processing_time': processing_time
+            }
         else:  # Manual mode
             if self.is_running:
                 self.motor_controller.handle_manual_control()
-            return frame
+            return {
+                'processed_image': frame,
+                'bev_image': None,
+                'bev_boxes': [],
+                'lane_info': None,
+                'steering_angle': 0.0,
+                'speed': 0.0,
+                'processing_time': 0.0
+            }
 
     def wait_for_mode_selection(self):
         """시작 시 모드 선택 대기"""
@@ -208,7 +260,14 @@ class DrivingSystemController:
                     break
 
                 # 이미지 처리 및 차량 제어
-                processed_image = self.process_and_control(frame)
+                processed_info = self.process_and_control(frame)
+                processed_image = processed_info['processed_image']
+                bev_image = processed_info['bev_image']
+                bev_boxes = processed_info['bev_boxes']
+                lane_info = processed_info['lane_info']
+                steering_angle = processed_info['steering_angle']
+                calculated_speed = processed_info['speed']
+                processing_time = processed_info['processing_time']
                 
                 # 상태 표시
                 mode_text = "모드: " + ("자율주행" if self.control_mode == 1 else "수동주행")
@@ -221,6 +280,10 @@ class DrivingSystemController:
                 # cv2.putText(processed_image, algorithm_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
                 # cv2.imshow("Processed Image", processed_image)
+                if is_jupyter_environment():
+                    plt.imshow(cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB))
+                    plt.title(f"{mode_text}\n{status_text}\n{algorithm_text}")
+                    plt.pause(0.01)
 
         except KeyboardInterrupt:
             print("\n사용자에 의해 중지되었습니다.")
