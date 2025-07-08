@@ -39,7 +39,7 @@ def load_dpu():
     global dpu, input_data, output_data, shapeIn, shapeOut0, shapeOut1
     
     overlay = DpuOverlay("../dpu/dpu.bit")
-    overlay.load_model("../xmodel/top-tiny-yolov3_coco_256.xmodel")
+    overlay.load_model("../xmodel/tiny-yolov3_coco_256.xmodel")
     
     dpu = overlay.runner
     

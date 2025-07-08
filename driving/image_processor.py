@@ -310,7 +310,27 @@ class ImageProcessor:
         right_lines = []
         for i, box in enumerate(xyxy_results):
             y1, x1, y2, x2 = [int(v) for v in box]
+            
+            # 바운딩 박스 좌표가 이미지 범위를 벗어나는 경우 처리
+            y1 = max(0, min(y1, processed_img.shape[0] - 1))
+            x1 = max(0, min(x1, processed_img.shape[1] - 1))
+            y2 = max(0, min(y2, processed_img.shape[0]))
+            x2 = max(0, min(x2, processed_img.shape[1]))
+            
+            # 유효한 ROI 영역인지 확인
+            if y1 >= y2 or x1 >= x2:
+                continue
+                
             roi = processed_img[y1:y2, x1:x2]
+            
+            # ROI가 비어있거나 유효하지 않은 경우 건너뛰기
+            if roi is None or roi.size == 0:
+                continue
+                
+            # ROI 크기가 너무 작은 경우도 건너뛰기 (최소 5x5 픽셀)
+            if roi.shape[0] < 5 or roi.shape[1] < 5:
+                continue
+                
             # === debugging/visualize.py의 process_roi와 동일하게 ===
             blurred = cv2.GaussianBlur(roi, (5,5), 1)
             gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
@@ -414,6 +434,7 @@ class ImageProcessor:
         print(f"Lateral error: {lateral_err:.3f}m, Heading error: {math.degrees(heading_err):.1f}°")
         print(f"Lane center: {lane_cx:.1f}, Image center: {image_cx:.1f}")
         print(f"Steering: {steering:.2f}°, Speed: {v:.1f}")
+        print()  # 빈 줄 추가
         
         return steering, v
 
@@ -612,6 +633,7 @@ class ImageProcessor:
             print(f"Base steering: {base_steering_angle:.2f}°, Final: {steering_angle:.2f}°")
             print(f"Calculated speed: {calculated_speed:.1f} m/s")
             print(f"History size: {len(self.steering_history)}, No lane count: {self.no_lane_detection_count}")
+            print("-" * 50)  # 구분선 추가
         else:
             # 기존 방식 사용 (하위 호환성)
             right_lane_center = self.detect_lane_center_x(boxes)
@@ -631,7 +653,9 @@ class ImageProcessor:
                 # 히스토리에 추가
                 self.add_steering_to_history(steering_angle)
                 calculated_speed = self.v_r
-        
+            
+            print("-" * 50)  # 구분선 추가
+
         # === 최종 주행각도 영상에 표시 ===
         cv2.putText(img, f"Steering Angle: {steering_angle:.2f}°", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
         cv2.putText(img, f"Speed: {calculated_speed:.1f} m/s", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
