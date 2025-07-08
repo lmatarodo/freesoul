@@ -95,8 +95,26 @@ class DrivingSystemController:
             처리된 이미지
         """
         if self.control_mode == 1:  # Autonomous mode
-            steering_angle, image = self.image_processor.process_frame(frame, use_kanayama=self.use_kanayama)
+            steering_angle, calculated_speed, image = self.image_processor.process_frame(frame, use_kanayama=self.use_kanayama)
             if self.is_running:
+                # Kanayama에서 계산된 속도를 실제 모터에 적용
+                if self.use_kanayama:
+                    # 계산된 속도를 모터 duty cycle로 변환 (0~30 m/s → 0~100%)
+                    # 30 m/s = 100%, 0 m/s = 0%로 선형 변환
+                    motor_speed_percent = (calculated_speed / 30.0) * 100.0
+                    motor_speed_percent = max(0, min(100, motor_speed_percent))  # 0~100 범위 제한
+                    
+                    # 모터에 적용
+                    self.motor_controller.left_speed = motor_speed_percent
+                    self.motor_controller.right_speed = motor_speed_percent
+                    
+                    print(f"Kanayama 속도 적용: {calculated_speed:.1f} m/s → {motor_speed_percent:.1f}%")
+                else:
+                    # 기존 방식: 고정 속도 사용
+                    self.motor_controller.left_speed = self.speed
+                    self.motor_controller.right_speed = self.speed
+                
+                # 조향 제어
                 self.motor_controller.control_motors(steering_angle, control_mode=1)
             return image
         else:  # Manual mode
@@ -198,11 +216,11 @@ class DrivingSystemController:
                 algorithm_text = "알고리즘: " + ("Kanayama" if self.use_kanayama else "기존 방식")
                 
                 # 화면에 상태 정보 표시
-                cv2.putText(processed_image, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(processed_image, status_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(processed_image, algorithm_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # cv2.putText(processed_image, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # cv2.putText(processed_image, status_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # cv2.putText(processed_image, algorithm_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
-                cv2.imshow("Processed Image", processed_image)
+                # cv2.imshow("Processed Image", processed_image)
 
         except KeyboardInterrupt:
             print("\n사용자에 의해 중지되었습니다.")

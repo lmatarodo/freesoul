@@ -39,8 +39,8 @@ class MotorController:
         self.spi.mode = 0b00
         
         # 저항 값 범위 설정
-        self.resistance_most_left = 1045 
-        self.resistance_most_right = 220 
+        self.resistance_most_left = 2800 
+        self.resistance_most_right = 2200
     @property
     def steering_speed(self):
         return self._steering_speed
@@ -106,7 +106,7 @@ class MotorController:
                 self.last_steering_time = current_time
             duty = self.current_duty
             
-        self.motors['motor_1'].write(0x08, 0)  # valid  steering_left
+        self.motors['motor_4'].write(0x08, 0)  # valid  steering_left
         self.motors['motor_5'].write(0x08, 1)  # valid  steering_right
         self.motors['motor_5'].write(0x04, duty)
 
@@ -123,8 +123,8 @@ class MotorController:
             duty = self.current_duty
             
         self.motors['motor_5'].write(0x08, 0)  # valid  steering_right
-        self.motors['motor_1'].write(0x08, 1)  # valid  steering_left
-        self.motors['motor_1'].write(0x04, duty)
+        self.motors['motor_4'].write(0x08, 1)  # valid  steering_left
+        self.motors['motor_4'].write(0x04, duty)
 
     def stay(self, steering_speed, control_mode=1):
         """중립 상태 유지"""
@@ -136,39 +136,39 @@ class MotorController:
             duty = self.current_duty
             
         self.motors['motor_5'].write(0x08, 0)  # valid  steering_right
-        self.motors['motor_1'].write(0x08, 0)  # valid  steering_left
+        self.motors['motor_4'].write(0x08, 0)  # valid  steering_left
         self.motors['motor_5'].write(0x04, duty)
-        self.motors['motor_1'].write(0x04, duty)
+        self.motors['motor_4'].write(0x04, duty)
 
     def set_left_speed(self, speed):
         """왼쪽 모터 속도 설정"""
         duty_percent = abs(speed) / 100
         duty = int(self.size * duty_percent)
         
-        self.motors['motor_2'].write(0x04, duty)
-        self.motors['motor_3'].write(0x04, duty)
+        self.motors['motor_0'].write(0x04, duty)
+        self.motors['motor_1'].write(0x04, duty)
         
         if speed > 0:
-            self.motors['motor_2'].write(0x08, 0)
-            self.motors['motor_3'].write(0x08, 1)
+            self.motors['motor_0'].write(0x08, 0)
+            self.motors['motor_1'].write(0x08, 1)
         else:
-            self.motors['motor_2'].write(0x08, 1)
-            self.motors['motor_3'].write(0x08, 0)
+            self.motors['motor_0'].write(0x08, 1)
+            self.motors['motor_1'].write(0x08, 0)
 
     def set_right_speed(self, speed):
         """오른쪽 모터 속도 설정"""
         duty_percent = abs(speed) / 100
         duty = int(self.size * duty_percent)
         
-        self.motors['motor_4'].write(0x04, duty)
-        self.motors['motor_0'].write(0x04, duty)
+        self.motors['motor_3'].write(0x04, duty)
+        self.motors['motor_2'].write(0x04, duty)
         
         if speed > 0:
-            self.motors['motor_4'].write(0x08, 0)
-            self.motors['motor_0'].write(0x08, 1)
+            self.motors['motor_3'].write(0x08, 0)
+            self.motors['motor_2'].write(0x08, 1)
         else:
-            self.motors['motor_4'].write(0x08, 1)
-            self.motors['motor_0'].write(0x08, 0)
+            self.motors['motor_3'].write(0x08, 1)
+            self.motors['motor_2'].write(0x08, 0)
 
     def read_adc(self):
         """ADC 값 읽기"""

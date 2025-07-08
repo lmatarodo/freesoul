@@ -408,7 +408,7 @@ class ImageProcessor:
 
         # 6) 픽셀→도 단위 보정 (k_p) - debugging/visualize.py와 동일
         steering = math.degrees(delta) * (Fix_Speed/25)
-        steering = max(min(steering, 50.0), -50.0)
+        steering = max(min(steering, 30.0), -30.0)
         
         # 디버깅 정보 출력
         print(f"Lateral error: {lateral_err:.3f}m, Heading error: {math.degrees(heading_err):.1f}°")
@@ -508,7 +508,7 @@ class ImageProcessor:
         h, w = img.shape[0], img.shape[1]
         dst_mat = [[round(w * 0.3), 0], [round(w * 0.7), 0], 
                   [round(w * 0.7), h], [round(w * 0.3), h]]
-        src_mat = [[238, 316], [402, 313], [501, 476], [155, 476]]
+        src_mat = [[250, 316], [380, 316], [450, 476], [200, 476]]
         
         bird_img = self.bird_convert(img, srcmat=src_mat, dstmat=dst_mat)
         roi_image = self.roi_rectangle_below(bird_img, cutting_idx=300)
@@ -600,8 +600,8 @@ class ImageProcessor:
             # Kanayama 제어기 사용
             lane_info = self.extract_lane_info_improved(boxes, classes, img)
             
-            # 기본 조향각 계산
-            base_steering_angle, speed = self.kanayama_control(lane_info)
+            # 기본 조향각과 속도 계산
+            base_steering_angle, calculated_speed = self.kanayama_control(lane_info)
             
             # 강건한 조향각 계산 (히스토리 적용)
             steering_angle = self.get_robust_steering_angle(lane_info, base_steering_angle)
@@ -610,6 +610,7 @@ class ImageProcessor:
             print(f"Left: x={lane_info.left_x:.1f}, slope={lane_info.left_slope:.3f}")
             print(f"Right: x={lane_info.right_x:.1f}, slope={lane_info.right_slope:.3f}")
             print(f"Base steering: {base_steering_angle:.2f}°, Final: {steering_angle:.2f}°")
+            print(f"Calculated speed: {calculated_speed:.1f} m/s")
             print(f"History size: {len(self.steering_history)}, No lane count: {self.no_lane_detection_count}")
         else:
             # 기존 방식 사용 (하위 호환성)
@@ -623,16 +624,17 @@ class ImageProcessor:
                     print(f"히스토리 평균 조향각 사용: {steering_angle:.2f}°")
                 else:
                     steering_angle = self.default_steering_angle
-                speed = self.v_r
+                calculated_speed = self.v_r
             else:
                 steering_angle = self.calculate_angle(self.reference_point_x, self.reference_point_y, 
                                                     right_lane_center, self.point_detection_height)
                 # 히스토리에 추가
                 self.add_steering_to_history(steering_angle)
-                speed = self.v_r
+                calculated_speed = self.v_r
         
         # === 최종 주행각도 영상에 표시 ===
         cv2.putText(img, f"Steering Angle: {steering_angle:.2f}°", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
+        cv2.putText(img, f"Speed: {calculated_speed:.1f} m/s", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         # === 끝 ===
 
-        return steering_angle, img
+        return steering_angle, calculated_speed, img
