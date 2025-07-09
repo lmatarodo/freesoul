@@ -259,11 +259,11 @@ class ImageProcessor:
             # 2-1. Adaptive thresholding on L (CLAHE 제외)
             binary_L = cv2.adaptiveThreshold(L, 255,
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
-                blockSize=55, C=-20)
+                blockSize=65, C=-30)
 
             # 2-2. HSV 색상 필터링 조합
             hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-            mask_hsv = (hsv[:,:,2] > 50) & (hsv[:,:,1] < 100)  # V > 50, S < 100
+            mask_hsv = (hsv[:,:,2] > 30) & (hsv[:,:,1] < 120)  # V > 50, S < 100
 
             # 2-3. 최종 마스크 결합
             final_mask = binary_L & mask_hsv
