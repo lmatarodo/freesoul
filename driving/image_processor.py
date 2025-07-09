@@ -217,12 +217,6 @@ class ImageProcessor:
         if len(xyxy_results) == 0:
             return lane_info
             
-        # 그레이스케일 변환
-        if len(processed_img.shape) == 3:
-            gray_img = cv2.cvtColor(processed_img, cv2.COLOR_BGR2GRAY)
-        else:
-            gray_img = processed_img
-            
         # 왼쪽 차선과 오른쪽 차선을 위한 픽셀 저장 리스트
         left_lane_pixels_x = []
         left_lane_pixels_y = []
@@ -252,10 +246,30 @@ class ImageProcessor:
             if roi.shape[0] < 5 or roi.shape[1] < 5:
                 continue
                 
-            # === driving_visualize.py의 process_roi와 동일하게 ===
+            # === driving_visualize.py의 process_roi와 동일한 전처리 파이프라인 ===
+            # 1. 블러
             blurred = cv2.GaussianBlur(roi, (5,5), 1)
-            gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
-            _, binary = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
+            
+            # 2. 추천 전처리 파이프라인 (CLAHE 제외)
+            # HLS 색공간 변환
+            hls = cv2.cvtColor(blurred, cv2.COLOR_BGR2HLS)
+            L = hls[:,:,1]  # Lightness
+            S = hls[:,:,2]  # Saturation
+
+            # 2-1. Adaptive thresholding on L (CLAHE 제외)
+            binary_L = cv2.adaptiveThreshold(L, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
+                blockSize=55, C=-20)
+
+            # 2-2. HSV 색상 필터링 조합
+            hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+            mask_hsv = (hsv[:,:,2] > 50) & (hsv[:,:,1] < 100)  # V > 50, S < 100
+
+            # 2-3. 최종 마스크 결합
+            final_mask = binary_L & mask_hsv
+            
+            # 이진화 결과를 uint8로 변환
+            binary = final_mask.astype(np.uint8) * 255
             
             # 슬라이딩 윈도우 적용
             fit, pts = slide_window_in_roi(binary, (0, 0, binary.shape[0], binary.shape[1]), n_win=15, margin=30, minpix=10)
@@ -334,7 +348,7 @@ class ImageProcessor:
             else:
                 return self.default_steering_angle, self.v_r
         
-        lane_width_m = 3.5  # debugging/visualize.py와 동일한 차로 폭
+        lane_width_m = 0.9  # debugging/visualize.py와 동일한 차로 폭
         Fix_Speed = self.v_r
         
         # 2) 픽셀 단위 차로 폭 & 픽셀당 미터 변환 계수
