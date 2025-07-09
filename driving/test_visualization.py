@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Jupyter 환경에서 BEV 시각화를 테스트하기 위한 스크립트
+driving_visualize.py와 동일한 전처리 파이프라인 및 시각화 방식 적용
 PYNQ 기반 Jupyter 노트북에서 실행 가능
-image_processor와 동일한 방식으로 직선 피팅 및 조향각 계산 포함
 """
 
 import cv2
@@ -12,7 +12,13 @@ import os
 import time
 import math
 from collections import deque
-from config import KANAYAMA_CONFIG, HISTORY_CONFIG
+from config import KANAYAMA_CONFIG, HISTORY_CONFIG, anchors, classes_path
+from yolo_utils import evaluate, pre_process
+from image_processor import ImageProcessor
+
+# 클래스명 로드 함수 추가
+with open(classes_path, 'r') as f:
+    class_names = f.read().strip().split('\n')
 
 # Jupyter 환경 감지
 def is_jupyter_environment():
@@ -28,254 +34,263 @@ def is_jupyter_environment():
     except NameError:
         return False
 
-def slide_window_in_roi(binary, box, n_win=15, margin=30, minpix=10):
-    """
-    image_processor.py와 동일한 슬라이딩 윈도우 적용
-    Args:
-        binary: 2D np.array (전체 BEV 이진화 이미지)
-        box: (y1, x1, y2, x2) – 전체 이미지 좌표계
-        n_win: 윈도우 개수 (15)
-        margin: 윈도우 마진 (30)
-        minpix: 최소 픽셀 수 (10)
-    Returns:
-        fit: (slope, intercept), lane_pts: (x, y) 리스트
-    """
-    y1, x1, y2, x2 = box
-    roi = binary[int(y1):int(y2), int(x1):int(x2)]
-    if roi.size == 0:
-        return None, None
-
-    window_height = roi.shape[0] // n_win
-    nonzero = roi.nonzero()
+def slide_window_search_roi(binary_roi):
+    """ROI 내부에서만 슬라이딩 윈도우 검색 (driving_visualize.py와 동일)"""
+    nwindows = 15
+    window_height = binary_roi.shape[0] // nwindows
+    nonzero = binary_roi.nonzero()
     nonzero_y, nonzero_x = nonzero
-    left_inds = []
-
+    margin, minpix = 30, 10
+    left_inds, right_inds = [], []
+    
     # ROI 내부에서 히스토그램으로 초기 좌표 찾기
-    hist = np.sum(roi[roi.shape[0]//2:,:], axis=0)
-    if np.max(hist) > 0:
-        current_x = np.argmax(hist)
-    else:
-        current_x = roi.shape[1] // 2
+    hist = np.sum(binary_roi[binary_roi.shape[0]//2:,:], axis=0)
+    mid = hist.shape[0]//2
+    left_current = np.argmax(hist[:mid]) if np.max(hist[:mid]) > 0 else mid//2
+    right_current = np.argmax(hist[mid:]) + mid if np.max(hist[mid:]) > 0 else mid + mid//2
 
-    for w in range(n_win):
-        y_low = roi.shape[0] - (w+1)*window_height
-        y_high = roi.shape[0] - w*window_height
-        x_low = max(0, current_x-margin)
-        x_high = min(roi.shape[1], current_x+margin)
+    for w in range(nwindows):
+        y_low = binary_roi.shape[0] - (w+1)*window_height
+        y_high = binary_roi.shape[0] - w*window_height
+        lx_low, lx_high = max(0, left_current-margin), min(binary_roi.shape[1], left_current+margin)
+        rx_low, rx_high = max(0, right_current-margin), min(binary_roi.shape[1], right_current+margin)
 
-        good_inds = ((nonzero_y>=y_low)&(nonzero_y<y_high)&(nonzero_x>=x_low)&(nonzero_x<x_high)).nonzero()[0]
-        if len(good_inds) > minpix:
-            current_x = int(nonzero_x[good_inds].mean())
-            left_inds.append(good_inds)
+        good_l = ((nonzero_y>=y_low)&(nonzero_y<y_high)&
+                  (nonzero_x>=lx_low)&(nonzero_x<lx_high)).nonzero()[0]
+        good_r = ((nonzero_y>=y_low)&(nonzero_y<y_high)&
+                  (nonzero_x>=rx_low)&(nonzero_x<rx_high)).nonzero()[0]
 
+        if len(good_l) > minpix:
+            left_current = int(nonzero_x[good_l].mean())
+            left_inds.append(good_l)
+        if len(good_r) > minpix:
+            right_current = int(nonzero_x[good_r].mean())
+            right_inds.append(good_r)
+
+    # 직선 피팅 (ROI 좌표계에서)
     if left_inds:
         left_inds = np.concatenate(left_inds)
         leftx, lefty = nonzero_x[left_inds], nonzero_y[left_inds]
-        # ROI 좌표를 전체 이미지 좌표로 변환
-        leftx_global = leftx + int(x1)
-        lefty_global = lefty + int(y1)
-        if len(leftx_global) >= 2:
-            left_fit = np.polyfit(lefty_global, leftx_global, 1)
-            return left_fit, (leftx_global, lefty_global)
-    return None, None
+        left_fit = np.polyfit(lefty, leftx, 1)
+    else:
+        left_fit = [0, 0]
+    
+    if right_inds:
+        right_inds = np.concatenate(right_inds)
+        rightx, righty = nonzero_x[right_inds], nonzero_y[right_inds]
+        right_fit = np.polyfit(righty, rightx, 1)
+    else:
+        right_fit = [0, 0]
+
+    return left_fit, right_fit
+
+def process_roi(roi, binary_frame, box):
+    """ROI 내부 전체 처리 & 직선 피팅 결과 좌표 리턴 (driving_visualize.py와 동일)"""
+    # 1. 블러
+    blurred = cv2.GaussianBlur(roi, (5,5), 1)
+    
+    # 2. 추천 전처리 파이프라인 (CLAHE 제외)
+    # HLS 색공간 변환
+    hls = cv2.cvtColor(blurred, cv2.COLOR_BGR2HLS)
+    L = hls[:,:,1]  # Lightness
+    S = hls[:,:,2]  # Saturation
+
+    # 2-1. Adaptive thresholding on L (CLAHE 제외)
+    binary_L = cv2.adaptiveThreshold(L, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
+        blockSize=65, C=-30)
+
+    # 2-2. HSV 색상 필터링 조합
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+    mask_hsv = (hsv[:,:,2] > 30) & (hsv[:,:,1] < 120)  # V > 30, S < 120
+
+    # 2-3. 최종 마스크 결합
+    final_mask = binary_L & mask_hsv
+    
+    
+    # 이진화 결과를 전체 프레임에 합성
+    x, y, x2, y2 = box
+    binary_frame[y:y2, x:x2] = final_mask.astype(np.uint8) * 255
+    
+    # ROI 내부에서만 슬라이딩 윈도우 검색
+    left_fit, right_fit = slide_window_search_roi(final_mask.astype(np.uint8) * 255)
+    
+    return left_fit, right_fit, final_mask.astype(np.uint8) * 255
 
 class LaneInfo:
-    """차선 정보를 저장하는 클래스 (image_processor.py와 동일)"""
-    def __init__(self, frame_width=256):
-        self.left_x = frame_width // 2  # 왼쪽 차선 x좌표 (기본값: 차선 없음)
-        self.right_x = frame_width // 2  # 오른쪽 차선 x좌표 (기본값: 차선 없음)
-        self.left_slope = 0.0  # 왼쪽 차선 기울기
-        self.left_intercept = 0.0  # 왼쪽 차선 y절편
-        self.right_slope = 0.0  # 오른쪽 차선 기울기
-        self.right_intercept = 0.0  # 오른쪽 차선 y절편
+    """차선 정보를 저장하는 클래스 (driving_visualize.py와 동일)"""
+    def __init__(self, w=256):  # 기본값을 256으로 변경
+        self.left_x = w // 2  # 영상의 절반으로 초기화
+        self.right_x = w // 2  # 영상의 절반으로 초기화
+        self.left_slope = 0.0
+        self.right_slope = 0.0
+        self.left_intercept = 0.0
+        self.right_intercept = 0.0
+        # fitLine 파라미터 추가
+        self.left_params = None   # (vx, vy, x0, y0)
+        self.right_params = None  # (vx, vy, x0, y0)
         self.left_points = None  # 슬라이딩 윈도우 결과 저장용
         self.right_points = None
 
-def create_binary_image(gray_img):
-    """image_processor.py와 동일한 이진화 이미지 생성"""
-    # 그레이스케일을 BGR로 변환 (HSV 변환을 위해)
-    if len(gray_img.shape) == 2:
-        bgr_img = cv2.cvtColor(gray_img, cv2.COLOR_GRAY2BGR)
+def find_boxes_by_color(frame, lower_hsv, upper_hsv):
+    """HSV 범위로 바운딩박스(테두리) 검출 (driving_visualize.py와 동일)"""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+    # 모폴로지로 테두리만 남기기
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # 컨투어로 검출
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    for cnt in contours:
+        x,y,w,h = cv2.boundingRect(cnt)
+        if w*h > 5000:  # 면적 임계치
+            boxes.append((x, y, x+w, y+h))
+    return boxes
+
+def extract_lane_info(boxes, frame, binary_frame, color_type, w):
+    """차선 정보 추출 - 여러 박스의 픽셀들을 합쳐서 하나의 직선 생성 (driving_visualize.py와 동일)"""
+    lane_x = w // 2  # 영상 중앙값으로 초기화
+    lane_slope = 0.0
+    lane_intercept = 0.0
+    
+    # 모든 박스에서 추출한 픽셀들을 저장할 리스트
+    all_lane_pixels_x = []
+    all_lane_pixels_y = []
+    
+    for box in boxes:
+        x, y, x2, y2 = box
+        roi = frame[y:y2, x:x2]
+        left_fit, right_fit, binary_roi = process_roi(roi, binary_frame, box)
+        
+        # 노란 박스는 왼쪽 차선, 파란 박스는 오른쪽 차선
+        if color_type == "yellow":
+            if abs(left_fit[0]) > 1e-6 or abs(left_fit[1]) > 1e-6:
+                # ROI 내에서 직선상의 점들을 생성
+                roi_height = y2 - y
+                roi_y_points = np.linspace(0, roi_height-1, roi_height)
+                roi_x_points = left_fit[0] * roi_y_points + left_fit[1]
+                
+                # 전체 프레임 좌표로 변환
+                global_x_points = roi_x_points + x
+                global_y_points = roi_y_points + y
+                
+                # 유효한 점들만 추가 (ROI 범위 내)
+                valid_mask = (roi_x_points >= 0) & (roi_x_points < (x2-x))
+                all_lane_pixels_x.extend(global_x_points[valid_mask])
+                all_lane_pixels_y.extend(global_y_points[valid_mask])
+                
+        else:  # blue
+            if abs(right_fit[0]) > 1e-6 or abs(right_fit[1]) > 1e-6:
+                # ROI 내에서 직선상의 점들을 생성
+                roi_height = y2 - y
+                roi_y_points = np.linspace(0, roi_height-1, roi_height)
+                roi_x_points = right_fit[0] * roi_y_points + right_fit[1]
+                
+                # 전체 프레임 좌표로 변환
+                global_x_points = roi_x_points + x
+                global_y_points = roi_y_points + y
+                
+                # 유효한 점들만 추가 (ROI 범위 내)
+                valid_mask = (roi_x_points >= 0) & (roi_x_points < (x2-x))
+                all_lane_pixels_x.extend(global_x_points[valid_mask])
+                all_lane_pixels_y.extend(global_y_points[valid_mask])
+    
+    # 모든 박스의 픽셀들을 합쳐서 하나의 직선 피팅
+    if len(all_lane_pixels_x) > 10:  # 충분한 점이 있을 때만
+        # numpy 배열로 변환
+        all_x = np.array(all_lane_pixels_x)
+        all_y = np.array(all_lane_pixels_y)
+        
+        # 전체 픽셀들로 직선 피팅 (y = mx + b 형태로)
+        combined_fit = np.polyfit(all_y, all_x, 1)
+        
+        # 프레임 중심에서의 x 좌표 계산
+        center_y = frame.shape[0] // 2
+        lane_x = combined_fit[0] * center_y + combined_fit[1]
+        lane_slope = combined_fit[0]
+        lane_intercept = combined_fit[1]
+    
+    return lane_x, lane_slope, lane_intercept
+
+def generate_left_lane_from_right(right_x, right_slope, right_intercept, frame_width, lane_width_pixels=160):
+    """오른쪽 차선을 기준으로 왼쪽 차선을 생성 (driving_visualize.py와 동일)"""
+    # 왼쪽 차선은 오른쪽 차선에서 일정 간격만큼 왼쪽에 위치
+    left_x = right_x - lane_width_pixels
+    
+    # 기울기는 오른쪽 차선과 동일 (평행한 차선)
+    left_slope = right_slope
+    
+    # y절편도 동일한 간격만큼 조정
+    left_intercept = right_intercept - lane_width_pixels
+    
+    # 프레임 범위 내로 제한
+    left_x = max(0, min(left_x, frame_width - 1))
+    
+    return left_x, left_slope, left_intercept
+
+def kanayama_control(lane_data, frame_width, Fix_Speed=30, lane_width_m=0.9):
+    """driving_visualize.py와 동일한 Kanayama 제어기"""
+    # 1) 데이터 없으면 그대로
+    if lane_data.left_x == frame_width // 2 and lane_data.right_x == frame_width // 2:
+        print("차선을 찾을 수 없습니다.")
+        return 0.0, Fix_Speed
+
+    # 2) 픽셀 단위 차로 폭 & 픽셀당 미터 변환 계수
+    lane_pixel_width = lane_data.right_x - lane_data.left_x
+    if lane_pixel_width > 0:
+        pix2m = lane_pixel_width / lane_width_m
     else:
-        bgr_img = gray_img
-    
-    # 1) HSV로 흰색만 뽑기 (더 관대한 임계값)
-    hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
-    lower_white = np.array([0, 0, 120])      # V 채널을 120으로 완화
-    upper_white = np.array([180, 80, 255])   # S 채널을 80으로 완화
-    mask_hsv = cv2.inRange(hsv, lower_white, upper_white)
+        pix2m = frame_width / lane_width_m  # fallback
 
-    # 2) 그레이스케일 적응적 임계값
-    mask_adaptive = cv2.adaptiveThreshold(gray_img, 255, 
-                                        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                        cv2.THRESH_BINARY, 11, 2)
-    
-    # 3) 고정 임계값도 백업으로 사용
-    _, mask_gray = cv2.threshold(gray_img, 120, 255, cv2.THRESH_BINARY)
+    # 3) 횡방향 오차: 차량 중앙(pixel) - 차로 중앙(pixel) → m 단위
+    image_cx    = frame_width / 2.0
+    lane_cx     = (lane_data.left_x + lane_data.right_x) / 2.0
+    lateral_err = (lane_cx - image_cx) / pix2m
 
-    # 4) 세 마스크 결합
-    mask = cv2.bitwise_or(mask_hsv, mask_adaptive)
-    mask = cv2.bitwise_or(mask, mask_gray)
+    # 4) 헤딩 오차 (차선 기울기 평균)
+    heading_err = -0.5 * (lane_data.left_slope + lane_data.right_slope)
 
-    # 5) 모폴로지로 노이즈 정리
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    
-    return mask
+    # 5) Kanayama 제어식
+    K_y, K_phi, L = 0.1, 0.3, 0.5
+    v_r = Fix_Speed
+    v = v_r * (math.cos(heading_err))**2
+    w = v_r * (K_y * lateral_err + K_phi * math.sin(heading_err))
+    delta = math.atan2(w * L, v)
 
-def extract_lane_info_improved(boxes, processed_img):
-    """image_processor.py와 동일한 차선 정보 추출"""
-    h, w = processed_img.shape[:2]
-    lane_info = LaneInfo(w)
-    if len(boxes) == 0:
-        return lane_info
+    # 6) 픽셀→도 단위 보정 (k_p)
+    steering = math.degrees(delta) * (Fix_Speed/25)
+    steering = max(min(steering, 30.0), -30.0)
     
-    # 그레이스케일 변환
-    if len(processed_img.shape) == 3:
-        gray_img = cv2.cvtColor(processed_img, cv2.COLOR_BGR2GRAY)
-    else:
-        gray_img = processed_img
+    # 디버깅 정보 출력
+    print(f"Lateral error: {lateral_err:.3f}m, Heading error: {math.degrees(heading_err):.1f}°")
+    print(f"Lane center: {lane_cx:.1f}, Image center: {image_cx:.1f}")
+    print(f"Steering: {steering:.2f}°, Speed: {v:.1f}")
     
-    left_lines = []
-    right_lines = []
-    
-    for i, box in enumerate(boxes):
-        y1, x1, y2, x2 = [int(v) for v in box]
-        
-        # 바운딩 박스 좌표가 이미지 범위를 벗어나는 경우 처리
-        y1 = max(0, min(y1, processed_img.shape[0] - 1))
-        x1 = max(0, min(x1, processed_img.shape[1] - 1))
-        y2 = max(0, min(y2, processed_img.shape[0]))
-        x2 = max(0, min(x2, processed_img.shape[1]))
-        
-        # 유효한 ROI 영역인지 확인
-        if y1 >= y2 or x1 >= x2:
-            continue
-            
-        roi = processed_img[y1:y2, x1:x2]
-        
-        # ROI가 비어있거나 유효하지 않은 경우 건너뛰기
-        if roi is None or roi.size == 0:
-            continue
-            
-        # ROI 크기가 너무 작은 경우도 건너뛰기
-        if roi.shape[0] < 5 or roi.shape[1] < 5:
-            continue
-            
-        # image_processor.py와 동일한 처리
-        blurred = cv2.GaussianBlur(roi, (5,5), 1)
-        gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
-
-        
-        # 슬라이딩 윈도우 적용
-        fit, pts = slide_window_in_roi(binary, (0, 0, binary.shape[0], binary.shape[1]), n_win=15, margin=30, minpix=10)
-        
-        if fit is not None and pts is not None:
-            slope, intercept = fit
-            xs, ys = pts
-            
-            # 이미지 하단(y=h-1)에서의 x 좌표 계산
-            x_bottom = slope * (h - 1) + intercept
-            line_info = {
-                'x_bottom': x_bottom,
-                'slope': slope,
-                'intercept': intercept,
-                'pixel_count': len(xs),
-                'points': (xs, ys)
-            }
-        else:
-            continue
-        
-        # 클래스 기반 좌우 분류 (가상 클래스 사용)
-        image_center_x = w / 2
-        if x_bottom < image_center_x:
-            left_lines.append(line_info)
-        else:
-            right_lines.append(line_info)
-    
-    if left_lines:
-        best_left = max(left_lines, key=lambda x: x['pixel_count'])
-        lane_info.left_x = best_left['x_bottom']
-        lane_info.left_slope = best_left['slope']
-        lane_info.left_intercept = best_left['intercept']
-        lane_info.left_points = best_left['points']
-    
-    if right_lines:
-        best_right = max(right_lines, key=lambda x: x['pixel_count'])
-        lane_info.right_x = best_right['x_bottom']
-        lane_info.right_slope = best_right['slope']
-        lane_info.right_intercept = best_right['intercept']
-        lane_info.right_points = best_right['points']
-    
-    return lane_info
+    return steering, v
 
 class TestVisualizationController:
-    """image_processor.py와 동일한 제어 로직을 가진 테스트용 컨트롤러"""
-    def __init__(self):
-        # Kanayama 제어기 파라미터 (config에서 불러오기)
-        self.K_y = KANAYAMA_CONFIG['K_y']
-        self.K_phi = KANAYAMA_CONFIG['K_phi']
-        self.L = KANAYAMA_CONFIG['L']
-        self.lane_width = KANAYAMA_CONFIG['lane_width']
-        self.v_r = KANAYAMA_CONFIG['v_r']
-        
-        # 조향각 히스토리 관리 (config에서 불러오기)
+    """driving_visualize.py와 동일한 제어 로직을 가진 클래스"""
+    
+    def __init__(self, frame_width=256):
+        # 조향각 히스토리 관리
         self.steering_history = deque(maxlen=HISTORY_CONFIG['max_history_size'])
         self.no_lane_detection_count = 0
         self.max_no_lane_frames = HISTORY_CONFIG['max_no_lane_frames']
         self.default_steering_angle = HISTORY_CONFIG['default_steering_angle']
         self.avg_window_size = HISTORY_CONFIG['avg_window_size']
         self.smoothing_factor = HISTORY_CONFIG['smoothing_factor']
-    
-    def kanayama_control(self, lane_info):
-        """image_processor.py와 동일한 Kanayama 제어기"""
-        # 이미지 크기 (256x256으로 리사이즈됨)
-        frame_width = 256
         
-        # 1) 데이터 없으면 그대로
-        if lane_info.left_x == frame_width // 2 and lane_info.right_x == frame_width // 2:
-            print("차선을 찾을 수 없습니다.")
-            return 0.0, KANAYAMA_CONFIG['v_r']  # config에서 v_r 사용
+        # 영상 가로 크기 저장
+        self.frame_width = frame_width
         
-        lane_width_m = 0.9  # image_processor.py와 동일한 차로 폭
-        Fix_Speed = KANAYAMA_CONFIG['v_r']  # config에서 v_r 사용
-        
-        # 2) 픽셀 단위 차로 폭 & 픽셀당 미터 변환 계수
-        lane_pixel_width = lane_info.right_x - lane_info.left_x
-        if lane_pixel_width > 0:
-            pix2m = lane_pixel_width / lane_width_m
-        else:
-            pix2m = frame_width / lane_width_m  # fallback
+        # Kanayama 제어기 파라미터
+        self.K_y = KANAYAMA_CONFIG['K_y']
+        self.K_phi = KANAYAMA_CONFIG['K_phi']
+        self.L = KANAYAMA_CONFIG['L']
+        self.lane_width = KANAYAMA_CONFIG['lane_width']
+        self.v_r = KANAYAMA_CONFIG['v_r']
 
-        # 3) 횡방향 오차: 차량 중앙(pixel) - 차로 중앙(pixel) → m 단위
-        image_cx = frame_width / 2.0
-        lane_cx = (lane_info.left_x + lane_info.right_x) / 2.0
-        lateral_err = (lane_cx - image_cx) / pix2m
-
-        # 4) 헤딩 오차 (차선 기울기 평균)
-        heading_err = -0.5 * (lane_info.left_slope + lane_info.right_slope)
-
-        # 5) Kanayama 제어식 (image_processor.py와 동일한 파라미터)
-        K_y, K_phi, L = 0.1, 0.3, 0.5
-        v_r = Fix_Speed
-        v = v_r * (math.cos(heading_err))**2
-        w = v_r * (K_y * lateral_err + K_phi * math.sin(heading_err))
-        delta = math.atan2(w * L, v)
-
-        # 6) 픽셀→도 단위 보정 (k_p) - image_processor.py와 동일
-        steering = math.degrees(delta) * (Fix_Speed/25)
-        steering = max(min(steering, 30.0), -30.0)
-        
-        # 디버깅 정보 출력
-        print(f"Lateral error: {lateral_err:.3f}m, Heading error: {math.degrees(heading_err):.1f}°")
-        print(f"Lane center: {lane_cx:.1f}, Image center: {image_cx:.1f}")
-        print(f"Steering: {steering:.2f}°, Speed: {v:.1f}")
-        print()  # 빈 줄 추가
-        
-        return steering, v
-    
     def add_steering_to_history(self, steering_angle):
         """조향각을 히스토리에 추가"""
         self.steering_history.append(steering_angle)
@@ -285,14 +300,10 @@ class TestVisualizationController:
         if len(self.steering_history) == 0:
             return self.default_steering_angle
         
-        # 기본값 사용
         if num_frames is None:
             num_frames = self.avg_window_size
         
-        # 최근 N개 값만 사용
         recent_values = list(self.steering_history)[-min(num_frames, len(self.steering_history)):]
-        
-        # 평균 계산
         average_steering = sum(recent_values) / len(recent_values)
         
         return average_steering
@@ -302,7 +313,6 @@ class TestVisualizationController:
         if len(self.steering_history) == 0:
             return current_steering_angle
         
-        # 이전 값과 현재 값을 가중 평균
         previous_angle = self.steering_history[-1]
         smoothed_angle = (self.smoothing_factor * previous_angle + 
                          (1 - self.smoothing_factor) * current_steering_angle)
@@ -311,437 +321,326 @@ class TestVisualizationController:
         
     def should_use_history(self, lane_info):
         """히스토리 사용 여부 결정"""
-        # 이미지 크기 (256x256으로 리사이즈됨)
-        frame_width = 256
-        
-        # 양쪽 차선이 모두 보이지 않는 경우
-        if lane_info.left_x == frame_width // 2 and lane_info.right_x == frame_width // 2:
+        if lane_info.left_x == self.frame_width // 2 and lane_info.right_x == self.frame_width // 2:
             self.no_lane_detection_count += 1
             return True
         else:
-            # 차선이 보이면 카운터 리셋
             self.no_lane_detection_count = 0
             return False
-    
-    def get_robust_steering_angle(self, lane_info, base_steering_angle):
-        """강건한 조향각 계산 (히스토리 적용)"""
-        # 히스토리 사용 여부 결정
-        if self.should_use_history(lane_info):
-            # 히스토리에서 평균값 사용
-            if len(self.steering_history) > 0:
-                robust_angle = self.get_average_steering()
-                print(f"히스토리 평균 조향각 사용: {robust_angle:.2f}°")
-            else:
-                robust_angle = self.default_steering_angle
-                print(f"기본 조향각 사용: {robust_angle:.2f}°")
-        else:
-            # 현재 계산된 조향각 사용
-            robust_angle = base_steering_angle
             
-            # 스무딩 적용
-            if len(self.steering_history) > 0:
-                robust_angle = self.get_smoothed_steering(robust_angle)
-        
-        # 히스토리에 추가
-        self.add_steering_to_history(robust_angle)
-        
-        return robust_angle
+    def get_robust_steering_angle(self, lane_info, current_steering_angle):
+        """강건한 조향각 계산 (히스토리 + 스무딩 적용)"""
+        if self.should_use_history(lane_info):
+            if self.no_lane_detection_count <= self.max_no_lane_frames:
+                robust_angle = self.get_average_steering()
+                print(f"차선 미검출: 이전 {min(self.avg_window_size, len(self.steering_history))}개 값 평균 사용 ({robust_angle:.2f}°)")
+                return robust_angle
+            else:
+                print(f"차선 미검출: 기본값 사용 ({self.default_steering_angle:.2f}°)")
+                return self.default_steering_angle
+        else:
+            smoothed_angle = self.get_smoothed_steering(current_steering_angle)
+            self.add_steering_to_history(smoothed_angle)
+            
+            if len(self.steering_history) > 1:
+                print(f"스무딩 적용: {current_steering_angle:.2f}° → {smoothed_angle:.2f}°")
+            
+            return smoothed_angle
 
-def draw_boxes_on_bev(bev_img, bev_boxes, color=(0, 255, 0)):
-    """BEV 영상 위에 바운딩 박스를 그리는 함수"""
-    if bev_img is None:
-        return None
+def draw_steering_info_matplotlib(ax, steering_angle, lane_data, visualizer, speed=None):
+    """matplotlib을 사용한 조향각과 차선 정보 표시"""
+    # 조향각 표시
+    ax.text(0.02, 0.95, f"Steering: {steering_angle:.1f}°", 
+            transform=ax.transAxes, fontsize=12, color='green', 
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
     
-    img = bev_img.copy()
-    for box in bev_boxes:
-        x1, y1, x2, y2 = int(box['x1']), int(box['y1']), int(box['x2']), int(box['y2'])
-        class_name = box['class']
-        score = box['score']
-        
-        # 박스 그리기
-        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-        
-        # 클래스명과 점수 표시
-        label = f"{class_name}: {score:.2f}"
-        cv2.putText(img, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    # 속도 정보 표시
+    if speed is not None:
+        ax.text(0.02, 0.90, f"Speed: {speed:.1f} m/s", 
+                transform=ax.transAxes, fontsize=12, color='orange', 
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
     
-    return img
+    # 차선 정보 표시
+    if lane_data:
+        left_status = " (생성됨)" if lane_data.left_x != visualizer.frame_width // 2 and lane_data.left_x < 100 else ""
+        ax.text(0.02, 0.85, f"Left X: {lane_data.left_x:.0f}, Slope: {lane_data.left_slope:.3f}{left_status}", 
+                transform=ax.transAxes, fontsize=10, color='yellow', 
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+        
+        right_status = " (생성됨)" if lane_data.right_x != visualizer.frame_width // 2 and lane_data.right_x > 156 else ""
+        ax.text(0.02, 0.80, f"Right X: {lane_data.right_x:.0f}, Slope: {lane_data.right_slope:.3f}{right_status}", 
+                transform=ax.transAxes, fontsize=10, color='red', 
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+    
+    # 히스토리 정보 표시
+    ax.text(0.02, 0.75, f"History size: {len(visualizer.steering_history)}", 
+            transform=ax.transAxes, fontsize=10, color='blue', 
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+    ax.text(0.02, 0.70, f"No lane count: {visualizer.no_lane_detection_count}", 
+            transform=ax.transAxes, fontsize=10, color='blue', 
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
 
-def test_single_frame_visualization():
-    """단일 프레임으로 BEV 시각화 테스트 (직선 피팅 + 조향각 계산 포함)"""
-    print("단일 프레임 BEV 시각화 테스트를 시작합니다...")
-    print("=" * 60)
-    
-    # 테스트용 컨트롤러 초기화
-    controller = TestVisualizationController()
-    
-    # 비디오 파일 열기
-    video_path = '../result.mp4'
-    if not os.path.exists(video_path):
-        print(f"비디오 파일을 찾을 수 없습니다: {video_path}")
+def draw_generated_lane_matplotlib(ax, lane_x, lane_slope, lane_intercept, color, is_generated=True):
+    """matplotlib을 사용한 생성된 차선 그리기"""
+    if abs(lane_slope) < 1e-6 and abs(lane_intercept) < 1e-6:
         return
     
-    cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
-    cap.release()
+    # 차선의 시작점과 끝점 계산
+    y_bottom = 255
+    y_top = 128
     
-    if not ret:
-        print("프레임을 읽을 수 없습니다.")
-        return
+    x_bottom = lane_slope * y_bottom + lane_intercept
+    x_top = lane_slope * y_top + lane_intercept
     
-    # BEV 변환 파라미터 (image_processor.py와 동일)
-    h, w = frame.shape[0], frame.shape[1]
-    dst_mat = [[round(w * 0.3), 0], [round(w * 0.7), 0], 
-              [round(w * 0.7), h], [round(w * 0.3), h]]
-    src_mat = [[250, 316], [380, 316], [450, 476], [200, 476]]
+    # 프레임 범위 내로 제한
+    x_bottom = max(0, min(x_bottom, 255))
+    x_top = max(0, min(x_top, 255))
     
-    print(f"원본 프레임 크기: {frame.shape}")
-    print(f"BEV 변환 파라미터:")
-    print(f"  src_mat: {src_mat}")
-    print(f"  dst_mat: {dst_mat}")
-    print("-" * 60)
-    
-    # BEV 변환
-    transform_matrix = cv2.getPerspectiveTransform(
-        np.float32(src_mat), 
-        np.float32(dst_mat)
-    )
-    bird_img = cv2.warpPerspective(frame, transform_matrix, (w, h))
-    roi_image = bird_img[300:, :]  # ROI 영역
-    
-    print(f"BEV 영상 크기: {bird_img.shape}")
-    print(f"ROI 영역 크기: {roi_image.shape}")
-    print("-" * 60)
-    
-    # 256x256 리사이즈 (YOLO 모델 입력용)
-    img_256 = cv2.resize(roi_image, (256, 256))
-    
-    # 가상의 바운딩 박스 생성 (테스트용) - 256x256 리사이즈된 좌표
-    # 실제로는 YOLO 모델이 256x256 이미지에서 예측한 좌표
-    boxes_256x256 = [
-        {
-            'x1': 50, 'y1': 100, 'x2': 150, 'y2': 200,  # 256x256 좌표
-            'class': 'car', 'score': 0.85
-        },
-        {
-            'x1': 180, 'y1': 120, 'x2': 220, 'y2': 180,  # 256x256 좌표
-            'class': 'lane', 'score': 0.92
-        }
-    ]
-    
-    print("가상 바운딩 박스 (256x256 좌표):")
-    for i, box in enumerate(boxes_256x256):
-        print(f"  Box {i+1}: ({box['x1']}, {box['y1']}) - ({box['x2']}, {box['y2']}) - {box['class']} ({box['score']:.2f})")
-    print("-" * 60)
-    
-    # 256x256 좌표를 원본 BEV ROI 크기로 스케일 조정
-    scale_x = roi_image.shape[1] / 256.0
-    scale_y = roi_image.shape[0] / 256.0
-    
-    bev_boxes = []
-    for box in boxes_256x256:
-        bev_boxes.append({
-            'x1': int(box['x1'] * scale_x),
-            'y1': int(box['y1'] * scale_y),
-            'x2': int(box['x2'] * scale_x),
-            'y2': int(box['y2'] * scale_y),
-            'class': box['class'],
-            'score': box['score']
-        })
-    
-    print("스케일 조정된 바운딩 박스 (BEV ROI 좌표):")
-    for i, box in enumerate(bev_boxes):
-        print(f"  Box {i+1}: ({box['x1']}, {box['y1']}) - ({box['x2']}, {box['y2']}) - {box['class']} ({box['score']:.2f})")
-    print("-" * 60)
-    
-    # === 직선 피팅 및 차선 정보 추출 ===
-    print("직선 피팅 및 차선 정보 추출:")
-    print("-" * 60)
-    
-    # 바운딩 박스를 numpy 배열로 변환 (image_processor 형식)
-    boxes_np = []
-    for box in boxes_256x256:
-        boxes_np.append([box['y1'], box['x1'], box['y2'], box['x2']])  # (y1, x1, y2, x2) 형식
-    
-    # 차선 정보 추출
-    lane_info = extract_lane_info_improved(boxes_np, img_256)
-    
-    print(f"왼쪽 차선:")
-    print(f"  X 좌표: {lane_info.left_x:.1f}")
-    print(f"  기울기: {lane_info.left_slope:.3f}")
-    print(f"  Y절편: {lane_info.left_intercept:.1f}")
-    print(f"  픽셀 수: {len(lane_info.left_points[0]) if lane_info.left_points else 0}")
-    
-    print(f"오른쪽 차선:")
-    print(f"  X 좌표: {lane_info.right_x:.1f}")
-    print(f"  기울기: {lane_info.right_slope:.3f}")
-    print(f"  Y절편: {lane_info.right_intercept:.1f}")
-    print(f"  픽셀 수: {len(lane_info.right_points[0]) if lane_info.right_points else 0}")
-    print("-" * 60)
-    
-    # === Kanayama 제어기로 조향각 계산 ===
-    print("Kanayama 제어기 조향각 계산:")
-    print("-" * 60)
-    
-    # 기본 조향각과 속도 계산
-    base_steering_angle, calculated_speed = controller.kanayama_control(lane_info)
-    
-    # 강건한 조향각 계산 (히스토리 적용)
-    steering_angle = controller.get_robust_steering_angle(lane_info, base_steering_angle)
-    
-    print(f"기본 조향각: {base_steering_angle:.2f}°")
-    print(f"최종 조향각: {steering_angle:.2f}°")
-    print(f"계산된 속도: {calculated_speed:.1f} m/s")
-    print(f"히스토리 크기: {len(controller.steering_history)}")
-    print("-" * 60)
-    
-    # === 시각화 ===
-    print("시각화 생성 중...")
-    
-    if is_jupyter_environment():
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-        fig.suptitle('BEV Visualization with Lane Detection & Steering', fontsize=16)
-        
-        # 1. 원본 프레임
-        axes[0, 0].imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        axes[0, 0].set_title('Original Frame')
-        axes[0, 0].axis('off')
-        
-        # 2. BEV 변환 영상
-        axes[0, 1].imshow(cv2.cvtColor(bird_img, cv2.COLOR_BGR2RGB))
-        axes[0, 1].set_title('Bird\'s Eye View (Full)')
-        axes[0, 1].axis('off')
-        
-        # 3. ROI 영역
-        axes[0, 2].imshow(cv2.cvtColor(roi_image, cv2.COLOR_BGR2RGB))
-        axes[0, 2].set_title('ROI Region')
-        axes[0, 2].axis('off')
-        
-        # 4. 256x256 리사이즈 (YOLO 입력)
-        axes[1, 0].imshow(cv2.cvtColor(img_256, cv2.COLOR_BGR2RGB))
-        axes[1, 0].set_title('256x256 Resized (YOLO Input)')
-        axes[1, 0].axis('off')
-        
-        # 5. BEV + 바운딩 박스
-        bev_with_boxes = draw_boxes_on_bev(roi_image, bev_boxes)
-        axes[1, 1].imshow(cv2.cvtColor(bev_with_boxes, cv2.COLOR_BGR2RGB))
-        axes[1, 1].set_title(f'BEV with Bounding Boxes\nDetected: {len(bev_boxes)} objects')
-        axes[1, 1].axis('off')
-        
-        # 6. 시스템 정보
-        info_text = []
-        info_text.append(f"Base Steering: {base_steering_angle:.2f}°")
-        info_text.append(f"Final Steering: {steering_angle:.2f}°")
-        info_text.append(f"Speed: {calculated_speed:.1f} m/s")
-        info_text.append(f"Left Lane X: {lane_info.left_x:.1f}")
-        info_text.append(f"Right Lane X: {lane_info.right_x:.1f}")
-        info_text.append(f"Left Slope: {lane_info.left_slope:.3f}")
-        info_text.append(f"Right Slope: {lane_info.right_slope:.3f}")
-        info_text.append(f"History Size: {len(controller.steering_history)}")
-        info_text.append(f"Detected Objects: {len(bev_boxes)}")
-        
-        axes[1, 2].text(0.1, 0.9, '\n'.join(info_text), transform=axes[1, 2].transAxes, 
-                       fontsize=10, verticalalignment='top', fontfamily='monospace')
-        axes[1, 2].set_title('System Information')
-        axes[1, 2].axis('off')
-        
-        plt.tight_layout()
-        plt.show()
-        
+    if is_generated:
+        # 생성된 차선은 점선으로 표시
+        ax.plot([x_bottom, x_top], [y_bottom, y_top], color=color, linestyle='--', linewidth=3, alpha=0.8)
     else:
-        # 일반 환경에서 OpenCV 사용
-        cv2.imshow('Original Frame', frame)
-        cv2.imshow('Bird\'s Eye View', bird_img)
-        cv2.imshow('ROI Region', roi_image)
-        cv2.imshow('256x256 Resized', img_256)
-        
-        bev_with_boxes = draw_boxes_on_bev(roi_image, bev_boxes)
-        cv2.imshow('BEV with Bounding Boxes', bev_with_boxes)
-        
-        # 정보 텍스트
-        info_img = np.zeros((350, 500, 3), dtype=np.uint8)
-        cv2.putText(info_img, f"Base Steering: {base_steering_angle:.1f}°", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(info_img, f"Final Steering: {steering_angle:.1f}°", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(info_img, f"Speed: {calculated_speed:.1f} m/s", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-        cv2.putText(info_img, f"Left X: {lane_info.left_x:.1f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(info_img, f"Right X: {lane_info.right_x:.1f}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        cv2.putText(info_img, f"History Size: {len(controller.steering_history)}", (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-        cv2.putText(info_img, f"Objects: {len(bev_boxes)}", (10, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
-        cv2.imshow('System Info', info_img)
-        
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-    
-    print("시각화 완료!")
-    print("=" * 60)
+        # 일반 차선은 실선으로 그리기
+        ax.plot([x_bottom, x_top], [y_bottom, y_top], color=color, linewidth=3, alpha=0.8)
 
-def test_video_visualization(max_frames=30):
-    """비디오로 BEV 시각화 테스트 (직선 피팅 + 조향각 계산 포함)"""
-    print(f"비디오 BEV 시각화 테스트를 시작합니다... (최대 {max_frames} 프레임)")
-    print("=" * 60)
-    
-    # 테스트용 컨트롤러 초기화
-    controller = TestVisualizationController()
-    
-    # 비디오 파일 열기
-    video_path = '../result.mp4'
-    if not os.path.exists(video_path):
-        print(f"비디오 파일을 찾을 수 없습니다: {video_path}")
+class TestVisualizationYOLO:
+    def __init__(self, dpu, anchors, class_names):
+        self.dpu = dpu
+        self.anchors = anchors
+        self.class_names = class_names
+        inputTensors = dpu.get_input_tensors()
+        outputTensors = dpu.get_output_tensors()
+        self.shapeIn = tuple(inputTensors[0].dims)
+        self.shapeOut0 = tuple(outputTensors[0].dims)
+        self.shapeOut1 = tuple(outputTensors[1].dims)
+        self.input_data = [np.empty(self.shapeIn, dtype=np.float32, order="C")]
+        self.output_data = [
+            np.empty(self.shapeOut0, dtype=np.float32, order="C"),
+            np.empty(self.shapeOut1, dtype=np.float32, order="C")
+        ]
+
+    def infer(self, frame):
+        image_data = np.array(pre_process(frame, (256, 256)), dtype=np.float32)
+        image_shape = (256, 256)
+        self.input_data[0][...] = image_data.reshape(self.shapeIn[1:])
+        job_id = self.dpu.execute_async(self.input_data, self.output_data)
+        self.dpu.wait(job_id)
+        conv_out0 = np.reshape(self.output_data[0], self.shapeOut0)
+        conv_out1 = np.reshape(self.output_data[1], self.shapeOut1)
+        yolo_outputs = [conv_out0, conv_out1]
+        boxes, scores, classes = evaluate(yolo_outputs, image_shape, self.class_names, self.anchors)
+        return boxes, scores, classes
+
+def test_single_frame_visualization(dpu, camera_index=0, output_video_path="output_lane_detection.mp4", max_frames=100):
+    """실시간 카메라 + 동영상 저장 + BEV 변환"""
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        print(f"카메라 {camera_index}를 열 수 없습니다.")
         return
-    
-    cap = cv2.VideoCapture(video_path)
-    
-    # BEV 변환 파라미터
-    h, w = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    dst_mat = [[round(w * 0.3), 0], [round(w * 0.7), 0], 
-              [round(w * 0.7), h], [round(w * 0.3), h]]
-    src_mat = [[250, 316], [380, 316], [450, 476], [200, 476]]
-    
-    transform_matrix = cv2.getPerspectiveTransform(
-        np.float32(src_mat), 
-        np.float32(dst_mat)
-    )
-    
+    print(f"실시간 카메라 모드로 실행 중... (최대 {max_frames}프레임)")
+    print(f"동영상 저장 경로: {output_video_path}")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fps = 10
+    frame_size = (256*2, 256)
+    out = cv2.VideoWriter(output_video_path, fourcc, fps, frame_size)
     frame_count = 0
-    
-    if is_jupyter_environment():
-        plt.figure(figsize=(15, 10))
-    
-    while frame_count < max_frames:
+    visualizer = TestVisualizationController(frame_width=256)
+    yolo = TestVisualizationYOLO(dpu, anchors, class_names)
+    # BEV 변환용 예시 좌표 (실제 환경에 맞게 조정 필요)
+    srcmat = np.float32([[250, 316], [380, 316], [450, 476], [200, 476]])
+    dstmat = np.float32([[77, 0], [179, 0], [179, 255], [77, 255]])
+    while cap.isOpened() and frame_count < max_frames:
+        ret, frame = cap.read()
+        if not ret:
+            print("카메라에서 프레임을 읽을 수 없습니다.")
+            break
+        # BEV 변환
+        frame_bev = ImageProcessor(dpu, classes_path, anchors).bird_convert(frame, srcmat, dstmat)
+        # 이하 기존 파이프라인에서 frame -> frame_bev로 대체
+        boxes, scores, classes = yolo.infer(frame_bev)
+        left_lane_boxes = [tuple(map(int, box)) for box, cls in zip(boxes, classes) if cls == 0]
+        right_lane_boxes = [tuple(map(int, box)) for box, cls in zip(boxes, classes) if cls == 1]
+        frame_bev = cv2.resize(frame_bev, (256, 256))
+        h, w = frame_bev.shape[:2]
+        binary_frame = np.zeros((h, w), dtype=np.uint8)
+        lane_data = LaneInfo(w)
+        left_x, left_slope, left_intercept = extract_lane_info(left_lane_boxes, frame_bev, binary_frame, "yellow", w)
+        lane_data.left_x = left_x
+        lane_data.left_slope = left_slope
+        lane_data.left_intercept = left_intercept
+        right_x, right_slope, right_intercept = extract_lane_info(right_lane_boxes, frame_bev, binary_frame, "blue", w)
+        lane_data.right_x = right_x
+        lane_data.right_slope = right_slope
+        lane_data.right_intercept = right_intercept
+        if lane_data.left_x == w // 2 and lane_data.right_x != w // 2:
+            left_x, left_slope, left_intercept = generate_left_lane_from_right(
+                lane_data.right_x, lane_data.right_slope, lane_data.right_intercept, w, lane_width_pixels=160
+            )
+            lane_data.left_x = left_x
+            lane_data.left_slope = left_slope
+            lane_data.left_intercept = left_intercept
+        elif lane_data.right_x == w // 2 and lane_data.left_x != w // 2:
+            right_x = lane_data.left_x + 160
+            right_slope = lane_data.left_slope
+            right_intercept = lane_data.left_intercept + 160
+            right_x = max(0, min(right_x, w - 1))
+            lane_data.right_x = right_x
+            lane_data.right_slope = right_slope
+            lane_data.right_intercept = right_intercept
+        frame_w = frame_bev.shape[1]
+        base_steering_angle, speed = kanayama_control(lane_data, frame_w)
+        steering_angle = visualizer.get_robust_steering_angle(lane_data, base_steering_angle)
+        for box in left_lane_boxes:
+            x, y, x2, y2 = box
+            cv2.rectangle(frame_bev, (x, y), (x2, y2), (0, 255, 255), 2)
+        for box in right_lane_boxes:
+            x, y, x2, y2 = box
+            cv2.rectangle(frame_bev, (x, y), (x2, y2), (255, 0, 0), 2)
+        if lane_data.left_slope != 0.0 or lane_data.left_intercept != 0.0:
+            y_bottom = h - 1
+            y_top = h // 2
+            x_bottom = lane_data.left_slope * y_bottom + lane_data.left_intercept
+            x_top = lane_data.left_slope * y_top + lane_data.left_intercept
+            x_bottom = max(0, min(x_bottom, w - 1))
+            x_top = max(0, min(x_top, w - 1))
+            color = (0, 255, 0) if lane_data.left_x < 100 else (0, 255, 255)
+            cv2.line(frame_bev, (int(x_bottom), int(y_bottom)), (int(x_top), int(y_top)), color, 2)
+        if lane_data.right_slope != 0.0 or lane_data.right_intercept != 0.0:
+            y_bottom = h - 1
+            y_top = h // 2
+            x_bottom = lane_data.right_slope * y_bottom + lane_data.right_intercept
+            x_top = lane_data.right_slope * y_top + lane_data.right_intercept
+            x_bottom = max(0, min(x_bottom, w - 1))
+            x_top = max(0, min(x_top, w - 1))
+            color = (0, 0, 255) if lane_data.right_x > 156 else (255, 0, 0)
+            cv2.line(frame_bev, (int(x_bottom), int(y_bottom)), (int(x_top), int(y_top)), color, 2)
+        cv2.putText(frame_bev, f"Steering: {steering_angle:.1f} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(frame_bev, f"Speed: {speed:.1f} m/s", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(frame_bev, f"Frame: {frame_count}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        center_x, center_y = w // 2, h - 30
+        arrow_length = int(abs(steering_angle) * 2)
+        if steering_angle > 0:
+            end_x = center_x + arrow_length
+            cv2.arrowedLine(frame_bev, (center_x, center_y), (end_x, center_y), (0, 0, 255), 3)
+            cv2.putText(frame_bev, "RIGHT", (center_x + 20, center_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        elif steering_angle < 0:
+            end_x = center_x - arrow_length
+            cv2.arrowedLine(frame_bev, (center_x, center_y), (end_x, center_y), (0, 0, 255), 3)
+            cv2.putText(frame_bev, "LEFT", (center_x - 70, center_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        else:
+            cv2.arrowedLine(frame_bev, (center_x, center_y), (center_x, center_y - 30), (0, 255, 0), 3)
+            cv2.putText(frame_bev, "STRAIGHT", (center_x - 40, center_y - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        binary_3ch = cv2.cvtColor(binary_frame, cv2.COLOR_GRAY2BGR)
+        for box in left_lane_boxes:
+            x, y, x2, y2 = box
+            cv2.rectangle(binary_3ch, (x, y), (x2, y2), (0, 255, 255), 2)
+        for box in right_lane_boxes:
+            x, y, x2, y2 = box
+            cv2.rectangle(binary_3ch, (x, y), (x2, y2), (255, 0, 0), 2)
+        combined_frame = np.hstack([frame_bev, binary_3ch])
+        out.write(combined_frame)
+        frame_count += 1
+        if frame_count % 10 == 0:
+            print(f"처리된 프레임: {frame_count}")
+    cap.release()
+    out.release()
+    print(f"총 {frame_count}개 프레임 처리 완료")
+    print(f"동영상 저장 완료: {output_video_path}")
+    print(f"평균 조향각: {visualizer.get_average_steering():.2f}°")
+
+def test_video_visualization(dpu, max_frames=30, camera_index=0):
+    """비디오 시각화 테스트 (YOLO 박스 기반, BEV 변환, 실시간 카메라만 지원)"""
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        print(f"카메라 {camera_index}를 열 수 없습니다.")
+        return
+    print("실시간 카메라 모드로 실행 중... (ESC 키로 종료)")
+    frame_count = 0
+    visualizer = TestVisualizationController(frame_width=256)
+    steering_angles = []
+    speeds = []
+    frame_numbers = []
+    yolo = TestVisualizationYOLO(dpu, anchors, class_names)
+    srcmat = np.float32([[250, 316], [380, 316], [450, 476], [200, 476]])
+    dstmat = np.float32([[77, 0], [179, 0], [179, 255], [77, 255]])
+    while cap.isOpened() and frame_count < max_frames:
         ret, frame = cap.read()
         if not ret:
             break
-        
-        # BEV 변환
-        bird_img = cv2.warpPerspective(frame, transform_matrix, (w, h))
-        roi_image = bird_img[300:, :]
-        img_256 = cv2.resize(roi_image, (256, 256))
-        
-        # 가상의 바운딩 박스 생성 (테스트용) - 256x256 리사이즈된 좌표
-        bev_boxes = []
-        if frame_count % 10 == 0:  # 10프레임마다 박스 생성
-            # 256x256 좌표에서 예측된 박스 (실제 YOLO 모델 출력)
-            box_256x256 = {
-                'x1': 50 + frame_count, 'y1': 100, 'x2': 150 + frame_count, 'y2': 200,
-                'class': 'car', 'score': 0.85
-            }
-            
-            # 256x256 좌표를 원본 BEV ROI 크기로 스케일 조정
-            scale_x = roi_image.shape[1] / 256.0
-            scale_y = roi_image.shape[0] / 256.0
-            
-            bev_boxes.append({
-                'x1': int(box_256x256['x1'] * scale_x),
-                'y1': int(box_256x256['y1'] * scale_y),
-                'x2': int(box_256x256['x2'] * scale_x),
-                'y2': int(box_256x256['y2'] * scale_y),
-                'class': box_256x256['class'],
-                'score': box_256x256['score']
-            })
-        
-        # 차선 정보 추출 및 조향각 계산
-        boxes_np = []
-        for box in bev_boxes:
-            # BEV ROI 좌표를 256x256 좌표로 역변환
-            scale_x = 256.0 / roi_image.shape[1]
-            scale_y = 256.0 / roi_image.shape[0]
-            boxes_np.append([
-                int(box['y1'] * scale_y), 
-                int(box['x1'] * scale_x), 
-                int(box['y2'] * scale_y), 
-                int(box['x2'] * scale_x)
-            ])
-        
-        lane_info = extract_lane_info_improved(boxes_np, img_256)
-        
-        # 기본 조향각과 속도 계산
-        base_steering_angle, calculated_speed = controller.kanayama_control(lane_info)
-        
-        # 강건한 조향각 계산 (히스토리 적용)
-        steering_angle = controller.get_robust_steering_angle(lane_info, base_steering_angle)
-        
-        # 진행 상황 출력
-        if frame_count % 10 == 0:
-            print(f"Frame {frame_count}: Base {base_steering_angle:.1f}°, Final {steering_angle:.1f}°, Speed {calculated_speed:.1f} m/s")
-        
-        if is_jupyter_environment():
-            plt.clf()
-            
-            # 2x3 서브플롯
-            plt.subplot(2, 3, 1)
-            plt.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            plt.title(f'Original Frame {frame_count}')
-            plt.axis('off')
-            
-            plt.subplot(2, 3, 2)
-            plt.imshow(cv2.cvtColor(bird_img, cv2.COLOR_BGR2RGB))
-            plt.title('Bird\'s Eye View')
-            plt.axis('off')
-            
-            plt.subplot(2, 3, 3)
-            plt.imshow(cv2.cvtColor(roi_image, cv2.COLOR_BGR2RGB))
-            plt.title('ROI Region')
-            plt.axis('off')
-            
-            plt.subplot(2, 3, 4)
-            plt.imshow(cv2.cvtColor(img_256, cv2.COLOR_BGR2RGB))
-            plt.title('256x256 Resized')
-            plt.axis('off')
-            
-            plt.subplot(2, 3, 5)
-            if len(bev_boxes) > 0:
-                bev_with_boxes = draw_boxes_on_bev(roi_image, bev_boxes)
-                plt.imshow(cv2.cvtColor(bev_with_boxes, cv2.COLOR_BGR2RGB))
-                plt.title(f'BEV with Boxes\nObjects: {len(bev_boxes)}')
-            else:
-                plt.imshow(cv2.cvtColor(roi_image, cv2.COLOR_BGR2RGB))
-                plt.title('BEV with Boxes\nNo objects')
-            plt.axis('off')
-            
-            plt.subplot(2, 3, 6)
-            info_text = [
-                f"Base Steering: {base_steering_angle:.1f}°",
-                f"Final Steering: {steering_angle:.1f}°",
-                f"Speed: {calculated_speed:.1f} m/s",
-                f"Left X: {lane_info.left_x:.1f}",
-                f"Right X: {lane_info.right_x:.1f}",
-                f"History: {len(controller.steering_history)}",
-                f"Objects: {len(bev_boxes)}"
-            ]
-            plt.text(0.1, 0.9, '\n'.join(info_text), transform=plt.gca().transAxes, 
-                    fontsize=10, verticalalignment='top', fontfamily='monospace')
-            plt.title('System Info')
-            plt.axis('off')
-            
-            plt.tight_layout()
-            plt.pause(0.1)
-        
+        frame_bev = ImageProcessor(dpu, classes_path, anchors).bird_convert(frame, srcmat, dstmat)
+        boxes, scores, classes = yolo.infer(frame_bev)
+        left_lane_boxes = [tuple(map(int, box)) for box, cls in zip(boxes, classes) if cls == 0]
+        right_lane_boxes = [tuple(map(int, box)) for box, cls in zip(boxes, classes) if cls == 1]
+        frame_bev = cv2.resize(frame_bev, (256, 256))
+        h, w = frame_bev.shape[:2]
+        binary_frame = np.zeros((h, w), dtype=np.uint8)
+        lane_data = LaneInfo(w)
+        left_x, left_slope, left_intercept = extract_lane_info(left_lane_boxes, frame_bev, binary_frame, "yellow", w)
+        lane_data.left_x = left_x
+        lane_data.left_slope = left_slope
+        lane_data.left_intercept = left_intercept
+        right_x, right_slope, right_intercept = extract_lane_info(right_lane_boxes, frame_bev, binary_frame, "blue", w)
+        lane_data.right_x = right_x
+        lane_data.right_slope = right_slope
+        lane_data.right_intercept = right_intercept
+        if lane_data.left_x == w // 2 and lane_data.right_x != w // 2:
+            left_x, left_slope, left_intercept = generate_left_lane_from_right(
+                lane_data.right_x, lane_data.right_slope, lane_data.right_intercept, w, lane_width_pixels=160
+            )
+            lane_data.left_x = left_x
+            lane_data.left_slope = left_slope
+            lane_data.left_intercept = left_intercept
+        elif lane_data.right_x == w // 2 and lane_data.left_x != w // 2:
+            right_x = lane_data.left_x + 160
+            right_slope = lane_data.left_slope
+            right_intercept = lane_data.left_intercept + 160
+            right_x = max(0, min(right_x, w - 1))
+            lane_data.right_x = right_x
+            lane_data.right_slope = right_slope
+            lane_data.right_intercept = right_intercept
+        frame_w = frame_bev.shape[1]
+        base_steering_angle, speed = kanayama_control(lane_data, frame_w)
+        steering_angle = visualizer.get_robust_steering_angle(lane_data, base_steering_angle)
+        steering_angles.append(steering_angle)
+        speeds.append(speed)
+        frame_numbers.append(frame_count)
         frame_count += 1
-    
+        if frame_count % 10 == 0:
+            print(f"처리된 프레임: {frame_count}")
     cap.release()
-    
-    if is_jupyter_environment():
-        plt.close()
-    
-    print(f"비디오 처리 완료! 총 {frame_count} 프레임 처리됨")
-    print("=" * 60)
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+    ax1 = axes[0]
+    ax1.plot(frame_numbers, steering_angles, 'b-', linewidth=2, label='Steering Angle')
+    ax1.set_xlabel('Frame Number')
+    ax1.set_ylabel('Steering Angle (degrees)')
+    ax1.set_title('Camera Steering Angle Over Time', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    ax2 = axes[1]
+    ax2.plot(frame_numbers, speeds, 'r-', linewidth=2, label='Speed')
+    ax2.set_xlabel('Frame Number')
+    ax2.set_ylabel('Speed (m/s)')
+    ax2.set_title('Camera Speed Over Time', fontsize=14, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    plt.tight_layout()
+    plt.show()
+    print(f"총 {frame_count}개 프레임 처리 완료")
+    print(f"평균 조향각: {np.mean(steering_angles):.2f}°")
+    print(f"평균 속도: {np.mean(speeds):.2f} m/s")
 
-if __name__ == '__main__':
-    print("BEV 시각화 테스트 스크립트 (직선 피팅 + 조향각 계산 포함)")
-    print("=" * 60)
-    
-    # Jupyter 환경 확인
-    if is_jupyter_environment():
-        print("✅ Jupyter 환경에서 실행 중입니다.")
-        print("matplotlib을 사용하여 이미지를 표시합니다.")
-    else:
-        print("⚠️ 일반 Python 환경에서 실행 중입니다.")
-        print("OpenCV를 사용하여 이미지를 표시합니다.")
-    
-    print("\n사용 가능한 테스트:")
-    print("1. test_single_frame_visualization() - 단일 프레임 BEV 시각화 테스트")
-    print("2. test_video_visualization(max_frames=30) - 비디오 BEV 시각화 테스트")
-    
-    print("\n예시:")
-    print("test_single_frame_visualization()  # 단일 프레임 테스트")
-    print("test_video_visualization(20)  # 20프레임 비디오 테스트") 
+if __name__ == "__main__":
+    print("Jupyter 환경에서 실행 중...")
+    print("사용 가능한 함수들:")
+    print("1. test_single_frame_visualization(dpu, camera_index=0, output_video_path='output.mp4', max_frames=100)")
+    print("   - 실시간 카메라 + 동영상 저장 (OpenCV)")
+    print()
+    print("2. test_video_visualization(dpu, max_frames=30, camera_index=0)")
+    print("   - 비디오 시각화 (matplotlib 그래프, 실시간 카메라)")
+    print()
+    print("사용 예시:")
+    print("# 실시간 카메라 + 동영상 저장 (100프레임)")
+    print("test_single_frame_visualization(dpu, camera_index=0, output_video_path='lane_detection.mp4', max_frames=100)")
+    print()
+    print("# 비디오 (카메라, 50프레임)")
+    print("test_video_visualization(dpu, max_frames=50, camera_index=0)") 
