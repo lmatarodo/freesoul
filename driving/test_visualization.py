@@ -457,9 +457,17 @@ def test_single_frame_visualization(dpu, camera_index=0, output_video_path="outp
     visualizer = TestVisualizationController(frame_width=256)
     yolo = TestVisualizationYOLO(dpu, anchors, class_names)
     
-    # BEV 변환용 예시 좌표 (실제 환경에 맞게 조정 필요)
+    # BEV 변환용 예시 좌표 (data_collection과 동일하게 수정)
     srcmat = np.float32([[250, 316], [380, 316], [450, 476], [200, 476]])
-    dstmat = np.float32([[77, 0], [179, 0], [179, 255], [77, 255]])
+    # data_collection과 동일한 dstmat: 이미지 크기에 비례한 좌표
+    frame_width = 256  # BEV 변환 후 이미지 크기
+    frame_height = 256
+    dstmat = np.float32([
+        [round(frame_width * 0.3), 0],
+        [round(frame_width * 0.7), 0],
+        [round(frame_width * 0.7), frame_height],
+        [round(frame_width * 0.3), frame_height]
+    ])
     
     while cap.isOpened() and frame_count < max_frames:
         ret, frame = cap.read()
@@ -608,8 +616,16 @@ def test_video_visualization(dpu, max_frames=30, camera_index=0):
     speeds = []
     frame_numbers = []
     yolo = TestVisualizationYOLO(dpu, anchors, class_names)
+    # data_collection과 동일한 BEV 변환 좌표
     srcmat = np.float32([[250, 316], [380, 316], [450, 476], [200, 476]])
-    dstmat = np.float32([[77, 0], [179, 0], [179, 255], [77, 255]])
+    frame_width = 256  # BEV 변환 후 이미지 크기
+    frame_height = 256
+    dstmat = np.float32([
+        [round(frame_width * 0.3), 0],
+        [round(frame_width * 0.7), 0],
+        [round(frame_width * 0.7), frame_height],
+        [round(frame_width * 0.3), frame_height]
+    ])
     while cap.isOpened() and frame_count < max_frames:
         ret, frame = cap.read()
         if not ret:
