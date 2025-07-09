@@ -431,47 +431,67 @@ class TestVisualizationYOLO:
         boxes, scores, classes = evaluate(yolo_outputs, image_shape, self.class_names, self.anchors)
         return boxes, scores, classes
 
-def test_single_frame_visualization(dpu, camera_index=0, output_video_path="output_lane_detection.mp4", max_frames=100):
-    """실시간 카메라 + 동영상 저장 + BEV 변환"""
+def test_single_frame_visualization(dpu, camera_index=0, output_video_path="output_lane_detection.mp4", max_frames=100, save_png_interval=0.5, png_output_dir="output_frames"):
+    """실시간 카메라 + 동영상 저장 + BEV 변환 + PNG 저장"""
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
         print(f"카메라 {camera_index}를 열 수 없습니다.")
         return
+    
     print(f"실시간 카메라 모드로 실행 중... (최대 {max_frames}프레임)")
     print(f"동영상 저장 경로: {output_video_path}")
+    print(f"PNG 저장 간격: {save_png_interval}초")
+    print(f"PNG 저장 디렉토리: {png_output_dir}")
+    
+    # PNG 저장 디렉토리 생성
+    import os
+    os.makedirs(png_output_dir, exist_ok=True)
+    
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     fps = 10
     frame_size = (256*2, 256)
     out = cv2.VideoWriter(output_video_path, fourcc, fps, frame_size)
+    
     frame_count = 0
+    last_png_save_time = 0
     visualizer = TestVisualizationController(frame_width=256)
     yolo = TestVisualizationYOLO(dpu, anchors, class_names)
+    
     # BEV 변환용 예시 좌표 (실제 환경에 맞게 조정 필요)
     srcmat = np.float32([[250, 316], [380, 316], [450, 476], [200, 476]])
     dstmat = np.float32([[77, 0], [179, 0], [179, 255], [77, 255]])
+    
     while cap.isOpened() and frame_count < max_frames:
         ret, frame = cap.read()
         if not ret:
             print("카메라에서 프레임을 읽을 수 없습니다.")
             break
+            
+        current_time = time.time()
+        
         # BEV 변환
         frame_bev = ImageProcessor(dpu, classes_path, anchors).bird_convert(frame, srcmat, dstmat)
+        
         # 이하 기존 파이프라인에서 frame -> frame_bev로 대체
         boxes, scores, classes = yolo.infer(frame_bev)
         left_lane_boxes = [tuple(map(int, box)) for box, cls in zip(boxes, classes) if cls == 0]
         right_lane_boxes = [tuple(map(int, box)) for box, cls in zip(boxes, classes) if cls == 1]
+        
         frame_bev = cv2.resize(frame_bev, (256, 256))
         h, w = frame_bev.shape[:2]
         binary_frame = np.zeros((h, w), dtype=np.uint8)
         lane_data = LaneInfo(w)
+        
         left_x, left_slope, left_intercept = extract_lane_info(left_lane_boxes, frame_bev, binary_frame, "yellow", w)
         lane_data.left_x = left_x
         lane_data.left_slope = left_slope
         lane_data.left_intercept = left_intercept
+        
         right_x, right_slope, right_intercept = extract_lane_info(right_lane_boxes, frame_bev, binary_frame, "blue", w)
         lane_data.right_x = right_x
         lane_data.right_slope = right_slope
         lane_data.right_intercept = right_intercept
+        
         if lane_data.left_x == w // 2 and lane_data.right_x != w // 2:
             left_x, left_slope, left_intercept = generate_left_lane_from_right(
                 lane_data.right_x, lane_data.right_slope, lane_data.right_intercept, w, lane_width_pixels=160
@@ -487,15 +507,20 @@ def test_single_frame_visualization(dpu, camera_index=0, output_video_path="outp
             lane_data.right_x = right_x
             lane_data.right_slope = right_slope
             lane_data.right_intercept = right_intercept
+            
         frame_w = frame_bev.shape[1]
         base_steering_angle, speed = kanayama_control(lane_data, frame_w)
         steering_angle = visualizer.get_robust_steering_angle(lane_data, base_steering_angle)
+        
+        # 차선 박스 그리기
         for box in left_lane_boxes:
             x, y, x2, y2 = box
             cv2.rectangle(frame_bev, (x, y), (x2, y2), (0, 255, 255), 2)
         for box in right_lane_boxes:
             x, y, x2, y2 = box
             cv2.rectangle(frame_bev, (x, y), (x2, y2), (255, 0, 0), 2)
+            
+        # 차선 그리기
         if lane_data.left_slope != 0.0 or lane_data.left_intercept != 0.0:
             y_bottom = h - 1
             y_top = h // 2
@@ -505,6 +530,7 @@ def test_single_frame_visualization(dpu, camera_index=0, output_video_path="outp
             x_top = max(0, min(x_top, w - 1))
             color = (0, 255, 0) if lane_data.left_x < 100 else (0, 255, 255)
             cv2.line(frame_bev, (int(x_bottom), int(y_bottom)), (int(x_top), int(y_top)), color, 2)
+            
         if lane_data.right_slope != 0.0 or lane_data.right_intercept != 0.0:
             y_bottom = h - 1
             y_top = h // 2
@@ -514,9 +540,14 @@ def test_single_frame_visualization(dpu, camera_index=0, output_video_path="outp
             x_top = max(0, min(x_top, w - 1))
             color = (0, 0, 255) if lane_data.right_x > 156 else (255, 0, 0)
             cv2.line(frame_bev, (int(x_bottom), int(y_bottom)), (int(x_top), int(y_top)), color, 2)
+            
+        # 텍스트 정보 추가
         cv2.putText(frame_bev, f"Steering: {steering_angle:.1f} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(frame_bev, f"Speed: {speed:.1f} m/s", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         cv2.putText(frame_bev, f"Frame: {frame_count}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(frame_bev, f"Time: {current_time:.1f}s", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+        
+        # 조향 화살표 그리기
         center_x, center_y = w // 2, h - 30
         arrow_length = int(abs(steering_angle) * 2)
         if steering_angle > 0:
@@ -530,6 +561,8 @@ def test_single_frame_visualization(dpu, camera_index=0, output_video_path="outp
         else:
             cv2.arrowedLine(frame_bev, (center_x, center_y), (center_x, center_y - 30), (0, 255, 0), 3)
             cv2.putText(frame_bev, "STRAIGHT", (center_x - 40, center_y - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+        # 이진화 영상에 박스 그리기
         binary_3ch = cv2.cvtColor(binary_frame, cv2.COLOR_GRAY2BGR)
         for box in left_lane_boxes:
             x, y, x2, y2 = box
@@ -537,15 +570,29 @@ def test_single_frame_visualization(dpu, camera_index=0, output_video_path="outp
         for box in right_lane_boxes:
             x, y, x2, y2 = box
             cv2.rectangle(binary_3ch, (x, y), (x2, y2), (255, 0, 0), 2)
+            
+        # 결합된 프레임 생성
         combined_frame = np.hstack([frame_bev, binary_3ch])
+        
+        # 동영상 저장
         out.write(combined_frame)
+        
+        # PNG 저장 (0.5초 간격)
+        if current_time - last_png_save_time >= save_png_interval:
+            png_filename = os.path.join(png_output_dir, f"frame_{frame_count:04d}_time_{current_time:.1f}s.png")
+            cv2.imwrite(png_filename, combined_frame)
+            print(f"PNG 저장: {png_filename}")
+            last_png_save_time = current_time
+        
         frame_count += 1
         if frame_count % 10 == 0:
             print(f"처리된 프레임: {frame_count}")
+            
     cap.release()
     out.release()
     print(f"총 {frame_count}개 프레임 처리 완료")
     print(f"동영상 저장 완료: {output_video_path}")
+    print(f"PNG 파일들 저장 완료: {png_output_dir}/")
     print(f"평균 조향각: {visualizer.get_average_steering():.2f}°")
 
 def test_video_visualization(dpu, max_frames=30, camera_index=0):
