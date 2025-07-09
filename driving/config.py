@@ -24,8 +24,8 @@ classes_path = "../xmodel/lane_class.txt"
 
 # Kanayama 제어기 파라미터
 KANAYAMA_CONFIG = {
-    'K_y': 0.3,        # 횡방향 오차 게인
-    'K_phi': 0.9,      # 방향각 오차 게인
+    'K_y': 0.1,        # 횡방향 오차 게인
+    'K_phi': 0.3,      # 방향각 오차 게인
     'L': 0.5,          # 휠베이스 (m)
     'lane_width': 3.5, # 차선 폭 (m)
     'v_r': 20.0        # 기준 속도 (30.0에서 20.0으로 낮춤)
