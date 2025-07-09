@@ -149,6 +149,7 @@ class DrivingSystemController:
                     self.motor_controller.right_speed = self.speed
                 
                 # 조향 제어
+                print(f"[CONTROLLER_DEBUG] 조향 제어 호출: steering_angle={steering_angle:.2f}°")
                 self.motor_controller.control_motors(steering_angle, control_mode=1)
             
             # 시각화를 위한 정보 반환
