@@ -259,20 +259,21 @@ class ImageProcessor:
             # 2-1. Adaptive thresholding on L (CLAHE 제외)
             binary_L = cv2.adaptiveThreshold(L, 255,
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
-                blockSize=65, C=-30)
+                blockSize=65, C=-10)
 
             # 2-2. HSV 색상 필터링 조합
             hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-            mask_hsv = (hsv[:,:,2] > 30) & (hsv[:,:,1] < 120)  # V > 50, S < 100
+            mask_hsv = (hsv[:,:,2] > 10) & (hsv[:,:,1] < 180)  # V > 10, S < 180
 
             # 2-3. 최종 마스크 결합
             final_mask = binary_L & mask_hsv
-            
-            # 이진화 결과를 uint8로 변환
-            binary = final_mask.astype(np.uint8) * 255
-            
-            # 슬라이딩 윈도우 적용
-            fit, pts = slide_window_in_roi(binary, (0, 0, binary.shape[0], binary.shape[1]), n_win=15, margin=30, minpix=10)
+
+            # 전체 이미지 크기의 이진화 마스크 생성
+            full_binary_mask = np.zeros((h, w), dtype=np.uint8)
+            full_binary_mask[y1:y2, x1:x2] = final_mask.astype(np.uint8) * 255
+
+            # 슬라이딩 윈도우 적용 (전체 이미지 마스크 사용)
+            fit, pts = slide_window_in_roi(full_binary_mask, (y1, x1, y2, x2), n_win=15, margin=30, minpix=10)
             
             if fit is not None and pts is not None:
                 slope, intercept = fit

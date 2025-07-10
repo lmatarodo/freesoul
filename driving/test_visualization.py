@@ -98,11 +98,11 @@ def process_roi(roi, binary_frame, box):
     # 2-1. Adaptive thresholding on L (CLAHE 제외)
     binary_L = cv2.adaptiveThreshold(L, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
-        blockSize=65, C=-30)
+        blockSize=65, C=-10)
 
     # 2-2. HSV 색상 필터링 조합
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-    mask_hsv = (hsv[:,:,2] > 30) & (hsv[:,:,1] < 120)  # V > 30, S < 120
+    mask_hsv = (hsv[:,:,2] > 10) & (hsv[:,:,1] < 180)  # V > 30, S < 120
 
     # 2-3. 최종 마스크 결합
     final_mask = binary_L & mask_hsv

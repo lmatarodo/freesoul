@@ -98,7 +98,8 @@ class MotorController:
         print(f"[MOTOR_DEBUG] 우회전 제어: steering_speed={steering_speed}, control_mode={control_mode}")
         
         if control_mode == 1:  # 자율주행 모드
-            duty_percent = abs(steering_speed) / 100
+            # duty 계산 개선: 최소 duty 보장
+            duty_percent = max(0.15, abs(steering_speed) / 100)  # 최소 15% 보장
             duty = int(self.size * duty_percent)
             print(f"[MOTOR_DEBUG] 자율주행 모드: duty_percent={duty_percent:.2f}, duty={duty}")
         else:  # 수동 주행 모드
@@ -119,7 +120,8 @@ class MotorController:
         print(f"[MOTOR_DEBUG] 좌회전 제어: steering_speed={steering_speed}, control_mode={control_mode}")
         
         if control_mode == 1:  # 자율주행 모드
-            duty_percent = abs(steering_speed) / 100
+            # duty 계산 개선: 최소 duty 보장
+            duty_percent = max(0.15, abs(steering_speed) / 100)  # 최소 15% 보장
             duty = int(self.size * duty_percent)
             print(f"[MOTOR_DEBUG] 자율주행 모드: duty_percent={duty_percent:.2f}, duty={duty}")
         else:  # 수동 주행 모드
@@ -225,11 +227,12 @@ class MotorController:
         
         if angle is not None:
             target_angle = self.map_angle_to_range(angle)
-            # 조향각의 크기에 비례한 steering_speed 계산
+            # 조향각의 크기에 비례한 steering_speed 계산 (개선)
             angle_magnitude = abs(angle)
             max_angle = 30.0
             proportional_speed = (angle_magnitude / max_angle) * self.steering_speed
-            proportional_speed = max(10, min(self.steering_speed, proportional_speed))  # 최소 10, 최대 steering_speed
+            # 최소값을 20으로 증가하여 더 안정적인 조향 보장
+            proportional_speed = max(20, min(self.steering_speed, proportional_speed))
             print(f"[MOTOR_DEBUG] 입력 조향각: {angle:.2f}° → 목표 범위: {target_angle}")
             print(f"[MOTOR_DEBUG] 조향각 크기: {angle_magnitude:.2f}° → 비례 속도: {proportional_speed:.1f}")
         else:
@@ -250,6 +253,10 @@ class MotorController:
         else:
             print(f"[MOTOR_DEBUG] 우회전 (차이: {target_angle - mapped_resistance:.2f})")
             self.right(proportional_speed, control_mode)
+        
+        # 추가 디버깅 정보
+        print(f"[MOTOR_DEBUG] 최종 조향 제어 완료 - 속도: {proportional_speed:.1f}, 목표: {target_angle:.2f}, 현재: {mapped_resistance:.2f}")
+        print("-" * 50)
 
     def handle_manual_control(self):
         """수동 주행 모드에서의 키보드 입력 처리"""
