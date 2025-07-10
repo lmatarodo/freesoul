@@ -438,7 +438,12 @@ def test_single_frame_visualization(dpu, camera_index=0, output_video_path="outp
         print(f"카메라 {camera_index}를 열 수 없습니다.")
         return
     
+    # 카메라 해상도 설정 (640x480)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    
     print(f"실시간 카메라 모드로 실행 중... (최대 {max_frames}프레임)")
+    print(f"카메라 해상도: 640x480")
     print(f"동영상 저장 경로: {output_video_path}")
     print(f"PNG 저장 간격: {save_png_interval}초")
     print(f"PNG 저장 디렉토리: {png_output_dir}")
@@ -457,16 +462,15 @@ def test_single_frame_visualization(dpu, camera_index=0, output_video_path="outp
     visualizer = TestVisualizationController(frame_width=256)
     yolo = TestVisualizationYOLO(dpu, anchors, class_names)
     
-    # BEV 변환용 예시 좌표 (정사각형 비율로 수정)
+    # BEV 변환용 예시 좌표 (image_processor.py와 동일한 방식으로 수정)
     srcmat = np.float32([[250, 316], [380, 316], [450, 476], [200, 476]])
-    # 정사각형 비율로 dstmat 설정 (영상 찌그러짐 방지)
+    # 이미지 크기에 비례하여 dstmat 설정 (image_processor.py와 동일)
     frame_size = 256  # BEV 변환 후 이미지 크기
-    margin = frame_size * 0.2  # 좌우 여백 20%
     dstmat = np.float32([
-        [margin, 0],                    # 좌상단
-        [frame_size - margin, 0],       # 우상단
-        [frame_size - margin, frame_size], # 우하단
-        [margin, frame_size]            # 좌하단
+        [round(frame_size * 0.3), 0],                    # 좌상단
+        [round(frame_size * 0.7), 0],                    # 우상단
+        [round(frame_size * 0.7), frame_size],           # 우하단
+        [round(frame_size * 0.3), frame_size]            # 좌하단
     ])
     
     while cap.isOpened() and frame_count < max_frames:
@@ -609,22 +613,27 @@ def test_video_visualization(dpu, max_frames=30, camera_index=0):
     if not cap.isOpened():
         print(f"카메라 {camera_index}를 열 수 없습니다.")
         return
+    
+    # 카메라 해상도 설정 (640x480)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    
     print("실시간 카메라 모드로 실행 중... (ESC 키로 종료)")
+    print(f"카메라 해상도: 640x480")
     frame_count = 0
     visualizer = TestVisualizationController(frame_width=256)
     steering_angles = []
     speeds = []
     frame_numbers = []
     yolo = TestVisualizationYOLO(dpu, anchors, class_names)
-    # 정사각형 비율로 BEV 변환 좌표 설정
+    # image_processor.py와 동일한 BEV 변환 좌표 설정
     srcmat = np.float32([[250, 316], [380, 316], [450, 476], [200, 476]])
     frame_size = 256  # BEV 변환 후 이미지 크기
-    margin = frame_size * 0.2  # 좌우 여백 20%
     dstmat = np.float32([
-        [margin, 0],                    # 좌상단
-        [frame_size - margin, 0],       # 우상단
-        [frame_size - margin, frame_size], # 우하단
-        [margin, frame_size]            # 좌하단
+        [round(frame_size * 0.3), 0],                    # 좌상단
+        [round(frame_size * 0.7), 0],                    # 우상단
+        [round(frame_size * 0.7), frame_size],           # 우하단
+        [round(frame_size * 0.3), frame_size]            # 좌하단
     ])
     while cap.isOpened() and frame_count < max_frames:
         ret, frame = cap.read()

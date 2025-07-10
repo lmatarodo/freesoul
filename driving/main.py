@@ -205,7 +205,6 @@ def main():
         print("\n키보드 제어 안내:")
         print("Space: 주행 시작/정지")
         print("1/2: 자율주행/수동주행 모드 전환")
-        print("K: 제어 알고리즘 전환 (Kanayama <-> 기존 방식)")
         print("V: 시각화 켜기/끄기")
         if controller.control_mode == 2:
             print("\n수동 주행 제어:")
@@ -234,10 +233,6 @@ def main():
                         print("A/D: 좌회전/우회전")
                         print("R: 긴급 정지")
                 time.sleep(0.3)  # 디바운싱
-            
-            elif keyboard.is_pressed('k'):
-                time.sleep(0.3)  # 디바운싱
-                controller.toggle_control_algorithm()
             
             elif keyboard.is_pressed('v'):
                 time.sleep(0.3)  # 디바운싱

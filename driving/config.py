@@ -40,9 +40,4 @@ HISTORY_CONFIG = {
     'smoothing_factor': 0.2      # 스무딩 팩터 (0~1, 높을수록 부드러움)
 }
 
-# 기존 제어 파라미터 (하위 호환성)
-k_p = 30/25  # 속도 기반 비례 게인
-k_para = 20
-k_lateral = 5
-
 

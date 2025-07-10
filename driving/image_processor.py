@@ -385,23 +385,6 @@ class ImageProcessor:
         
         return steering, v
 
-    def detect_lane_center_x(self, xyxy_results):
-        """기존 방식: 가장 오른쪽 차선의 중심점 반환 (하위 호환성 유지)"""
-        rightmost_lane_x_min = None
-        rightmost_lane_x_max = None
-        rightmost_x_position = -float('inf')
-        
-        for box in xyxy_results:
-            y1, x1, y2, x2 = box
-            if x1 > rightmost_x_position:
-                rightmost_x_position = x1
-                rightmost_lane_x_min = int(x1)
-                rightmost_lane_x_max = int(x2)
-        
-        if rightmost_lane_x_min is not None and rightmost_lane_x_max is not None:
-            return (rightmost_lane_x_min + rightmost_lane_x_max) // 2
-        return None
-
     def add_steering_to_history(self, steering_angle):
         """조향각을 히스토리에 추가"""
         self.steering_history.append(steering_angle)
@@ -474,7 +457,7 @@ class ImageProcessor:
             
             return smoothed_angle
 
-    def process_frame(self, img, use_kanayama=True):
+    def process_frame(self, img):
         """프레임 처리 및 조향각 계산"""
         h, w = img.shape[0], img.shape[1]
         dst_mat = [[round(w * 0.3), 0], [round(w * 0.7), 0], 
@@ -483,7 +466,6 @@ class ImageProcessor:
         
         # BEV 변환
         bird_img = self.bird_convert(img, srcmat=src_mat, dstmat=dst_mat)
-        # roi_image = self.roi_rectangle_below(bird_img, cutting_idx=300)  # 삭제
         
         # 원본 BEV 영상 저장 (바운딩 박스 그리기 전)
         original_bev = bird_img.copy()
@@ -571,44 +553,20 @@ class ImageProcessor:
         cv2.putText(img, f"Right slope: {lane_info.right_slope:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         # === 끝 ===
 
-        if use_kanayama:
-            # Kanayama 제어기 사용
-            lane_info = self.extract_lane_info_improved(boxes, classes, img)
-            
-            # 기본 조향각과 속도 계산
-            base_steering_angle, calculated_speed = self.kanayama_control(lane_info)
-            
-            # 강건한 조향각 계산 (히스토리 적용)
-            steering_angle = self.get_robust_steering_angle(lane_info, base_steering_angle)
-            
-            # 차선 정보 디버깅 출력
-            print(f"Left: x={lane_info.left_x:.1f}, slope={lane_info.left_slope:.3f}")
-            print(f"Right: x={lane_info.right_x:.1f}, slope={lane_info.right_slope:.3f}")
-            print(f"Base steering: {base_steering_angle:.2f}°, Final: {steering_angle:.2f}°")
-            print(f"Calculated speed: {calculated_speed:.1f} m/s")
-            print(f"History size: {len(self.steering_history)}, No lane count: {self.no_lane_detection_count}")
-            print("-" * 50)  # 구분선 추가
-        else:
-            # 기존 방식 사용 (하위 호환성)
-            right_lane_center = self.detect_lane_center_x(boxes)
-            
-            if right_lane_center is None:
-                print("차선 중심을 찾을 수 없습니다.")
-                # 히스토리에서 평균값 사용
-                if len(self.steering_history) > 0:
-                    steering_angle = self.get_average_steering()
-                    print(f"히스토리 평균 조향각 사용: {steering_angle:.2f}°")
-                else:
-                    steering_angle = self.default_steering_angle
-                calculated_speed = self.v_r
-            else:
-                steering_angle = self.calculate_angle(self.reference_point_x, self.reference_point_y, 
-                                                    right_lane_center, self.point_detection_height)
-                # 히스토리에 추가
-                self.add_steering_to_history(steering_angle)
-                calculated_speed = self.v_r
-            
-            print("-" * 50)  # 구분선 추가
+        # Kanayama 제어기 사용
+        # 기본 조향각과 속도 계산
+        base_steering_angle, calculated_speed = self.kanayama_control(lane_info)
+        
+        # 강건한 조향각 계산 (히스토리 적용)
+        steering_angle = self.get_robust_steering_angle(lane_info, base_steering_angle)
+        
+        # 차선 정보 디버깅 출력
+        print(f"Left: x={lane_info.left_x:.1f}, slope={lane_info.left_slope:.3f}")
+        print(f"Right: x={lane_info.right_x:.1f}, slope={lane_info.right_slope:.3f}")
+        print(f"Base steering: {base_steering_angle:.2f}°, Final: {steering_angle:.2f}°")
+        print(f"Calculated speed: {calculated_speed:.1f} m/s")
+        print(f"History size: {len(self.steering_history)}, No lane count: {self.no_lane_detection_count}")
+        print("-" * 50)  # 구분선 추가
         
         # === 최종 주행각도 영상에 표시 ===
         cv2.putText(img, f"Steering Angle: {steering_angle:.2f}°", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
