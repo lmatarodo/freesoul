@@ -26,6 +26,41 @@ ULTRASONIC_ADDRESSES = {
     'ultrasonic_4': 0x00A00A0000   # 후방 우측
 }
 
+# 초음파 센서 레지스터 맵
+ULTRASONIC_REGISTERS = {
+    'DISTANCE_DATA': 0x00,    # 거리 데이터 (4바이트, mm 단위)
+    'STATUS': 0x04,           # 상태 레지스터 (1바이트)
+    'CONTROL': 0x08,          # 제어 레지스터 (1바이트)
+    'CONFIG': 0x0C,           # 설정 레지스터 (1바이트)
+    'TRIGGER': 0x10,          # 트리거 레지스터 (1바이트)
+    'ECHO_COUNT': 0x14        # 에코 카운트 (2바이트)
+}
+
+# 초음파 센서 상태 값
+ULTRASONIC_STATUS = {
+    'READY': 0x01,            # 센서 준비됨
+    'BUSY': 0x02,             # 측정 중
+    'ERROR': 0x04,            # 오류 상태
+    'TIMEOUT': 0x08           # 타임아웃
+}
+
+# 초음파 센서 제어 값
+ULTRASONIC_CONTROL = {
+    'INIT': 0x01,             # 초기화
+    'START_MEASURE': 0x02,    # 측정 시작
+    'STOP_MEASURE': 0x04,     # 측정 중지
+    'RESET': 0x08             # 리셋
+}
+
+# 초음파 센서 설정
+ULTRASONIC_CONFIG = {
+    'MEASUREMENT_INTERVAL': 0.1,  # 측정 간격 (초)
+    'TIMEOUT_THRESHOLD': 5000,    # 타임아웃 임계값 (ms)
+    'MIN_DISTANCE': 20,           # 최소 측정 거리 (mm)
+    'MAX_DISTANCE': 4000,         # 최대 측정 거리 (mm)
+    'SOUND_SPEED': 343000         # 음속 (mm/s)
+}
+
 # YOLO configurations
 anchor_list = [10, 14, 23, 27, 37, 58, 81, 82, 135, 169, 344, 319]
 anchors = np.array(anchor_list).reshape(-1, 2)
