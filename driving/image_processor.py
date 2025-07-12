@@ -368,7 +368,7 @@ class ImageProcessor:
         heading_err = -0.5 * (lane_info.left_slope + lane_info.right_slope)
 
         # 5) Kanayama 제어식 (debugging/visualize.py와 동일한 파라미터)
-        K_y, K_phi, L = 0.1, 0.3, 0.5
+        K_y, K_phi, L = 0.3, 0.9, 0.5
         v_r = Fix_Speed
         v = v_r * (math.cos(heading_err))**2
         w = v_r * (K_y * lateral_err + K_phi * math.sin(heading_err))

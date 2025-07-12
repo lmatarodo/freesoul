@@ -15,8 +15,9 @@ import spidev
 import keyboard
 import matplotlib.pyplot as plt
 from driving_system_controller import DrivingSystemController
+from parking_system_controller import ParkingSystemController
 from image_processor import ImageProcessor
-from config import MOTOR_ADDRESSES, ADDRESS_RANGE
+from config import MOTOR_ADDRESSES, ULTRASONIC_ADDRESSES, ADDRESS_RANGE
 from AutoLab_lib import init
 
 # Jupyter 환경 감지
@@ -74,13 +75,13 @@ def visualize_results(processed_info, frame_count=0):
         fig.suptitle(f'Autonomous Driving Visualization - Frame {frame_count}', fontsize=16)
         
         # 1. 원본 처리된 이미지
-        axes[0, 0].imshow(cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB))
+        #axes[0, 0].imshow(cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB))
         axes[0, 0].set_title(f'Processed Image\nSteering: {steering_angle:.1f}°, Speed: {calculated_speed:.1f} m/s')
         axes[0, 0].axis('off')
         
         # 2. BEV 영상 (바운딩 박스 없음)
         if bev_image is not None:
-            axes[0, 1].imshow(cv2.cvtColor(bev_image, cv2.COLOR_BGR2RGB))
+            #axes[0, 1].imshow(cv2.cvtColor(bev_image, cv2.COLOR_BGR2RGB))
             axes[0, 1].set_title('Bird\'s Eye View (Original)')
             axes[0, 1].axis('off')
         else:
@@ -91,12 +92,12 @@ def visualize_results(processed_info, frame_count=0):
         # 3. BEV 영상 + 바운딩 박스
         if bev_image is not None and len(bev_boxes) > 0:
             bev_with_boxes = draw_boxes_on_bev(bev_image, bev_boxes)
-            axes[1, 0].imshow(cv2.cvtColor(bev_with_boxes, cv2.COLOR_BGR2RGB))
+            # axes[1, 0].imshow(cv2.cvtColor(bev_with_boxes, cv2.COLOR_BGR2RGB))
             axes[1, 0].set_title(f'BEV with Bounding Boxes\nDetected: {len(bev_boxes)} objects')
             axes[1, 0].axis('off')
         else:
             if bev_image is not None:
-                axes[1, 0].imshow(cv2.cvtColor(bev_image, cv2.COLOR_BGR2RGB))
+                #axes[1, 0].imshow(cv2.cvtColor(bev_image, cv2.COLOR_BGR2RGB))
                 axes[1, 0].set_title('BEV with Bounding Boxes\nNo objects detected')
             else:
                 axes[1, 0].text(0.5, 0.5, 'No BEV Image', ha='center', va='center', transform=axes[1, 0].transAxes)
@@ -173,6 +174,13 @@ def main():
     overlay = load_dpu()
     controller = DrivingSystemController(overlay, dpu, motors, speed, steering_speed)
     
+    # 주차 시스템 초기화
+    ultrasonic_sensors = {}
+    for name, addr in ULTRASONIC_ADDRESSES.items():
+        ultrasonic_sensors[name] = MMIO(addr, ADDRESS_RANGE)
+    
+    parking_controller = ParkingSystemController(controller.motor_controller, ultrasonic_sensors)
+    
     # 시각화 모드 설정
     show_visualization = True
     frame_count = 0
@@ -205,6 +213,7 @@ def main():
         print("\n키보드 제어 안내:")
         print("Space: 주행 시작/정지")
         print("1/2: 자율주행/수동주행 모드 전환")
+        print("P: 주차 시스템 시작/정지")
         print("V: 시각화 켜기/끄기")
         if controller.control_mode == 2:
             print("\n수동 주행 제어:")
@@ -217,22 +226,38 @@ def main():
             # 키보드 입력 처리
             if keyboard.is_pressed('space'):
                 time.sleep(0.3)  # 디바운싱
-                if controller.is_running:
+                if parking_controller.is_parking_active:
+                    print("주차 시스템이 실행 중입니다. 주차를 먼저 중지하세요.")
+                elif controller.is_running:
                     controller.stop_driving()
                 else:
                     controller.start_driving()
             
             elif keyboard.is_pressed('1') or keyboard.is_pressed('2'):
-                prev_mode = controller.control_mode
-                new_mode = 1 if keyboard.is_pressed('1') else 2
-                if prev_mode != new_mode:
-                    controller.switch_mode(new_mode)
-                    if new_mode == 2:
-                        print("\n수동 주행 제어:")
-                        print("W/S: 전진/후진")
-                        print("A/D: 좌회전/우회전")
-                        print("R: 긴급 정지")
+                if parking_controller.is_parking_active:
+                    print("주차 시스템이 실행 중입니다. 주차를 먼저 중지하세요.")
+                else:
+                    prev_mode = controller.control_mode
+                    new_mode = 1 if keyboard.is_pressed('1') else 2
+                    if prev_mode != new_mode:
+                        controller.switch_mode(new_mode)
+                        if new_mode == 2:
+                            print("\n수동 주행 제어:")
+                            print("W/S: 전진/후진")
+                            print("A/D: 좌회전/우회전")
+                            print("R: 긴급 정지")
                 time.sleep(0.3)  # 디바운싱
+            
+            elif keyboard.is_pressed('p'):
+                time.sleep(0.3)  # 디바운싱
+                if controller.is_running:
+                    print("자율주행이 실행 중입니다. 주행을 먼저 중지하세요.")
+                elif parking_controller.is_parking_active:
+                    parking_controller.stop_parking()
+                    print("주차 시스템 중지")
+                else:
+                    parking_controller.start_parking()
+                    print("주차 시스템 시작")
             
             elif keyboard.is_pressed('v'):
                 time.sleep(0.3)  # 디바운싱
@@ -242,6 +267,18 @@ def main():
             if keyboard.is_pressed('q'):
                 print("\n프로그램을 종료합니다.")
                 break
+
+            # 주차 시스템 실행 (활성화된 경우)
+            if parking_controller.is_parking_active:
+                parking_controller.execute_parking_cycle()
+                parking_status = parking_controller.get_status()
+                print(f"주차 상태: {parking_status['status_message']} (단계: {parking_status['phase']})")
+                
+                # 센서 데이터 출력 (디버깅용)
+                sensor_distances = parking_status['sensor_distances']
+                print(f"센서 거리 - 전방우측: {sensor_distances['front_right']:.1f}cm, "
+                      f"중간우측: {sensor_distances['middle_right']:.1f}cm, "
+                      f"후방우측: {sensor_distances['rear_right']:.1f}cm")
 
             # 프레임 처리
             ret, frame = cap.read()
@@ -272,6 +309,7 @@ def main():
         else:
             cv2.destroyAllWindows()
         controller.stop_driving()
+        parking_controller.stop_parking()
 
 if __name__ == "__main__":
     main()

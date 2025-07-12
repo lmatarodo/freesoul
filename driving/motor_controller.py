@@ -27,6 +27,11 @@ class MotorController:
         self.duty_step = int(self.size * 0.02)  # duty 증가량 (2%)
         self.last_steering_time = time.time()
         
+        # 자동주행 점진적 제어 설정
+        self.auto_control_interval = 0.005  # 자동주행 제어 간격 (초)
+        self.auto_duty_step = int(self.size * 0.1)  # 자동주행 duty 증가량 (1%)
+        self.smooth_steering = True  # 부드러운 조향 활성화
+        
         # 제어 변수
         # self.auto_duty = self.min_duty
         self.manual_steering_angle = 0
@@ -39,8 +44,8 @@ class MotorController:
         self.spi.mode = 0b00
         
         # 저항 값 범위 설정
-        self.resistance_most_left = 3300 
-        self.resistance_most_right = 2500
+        self.resistance_most_left = 3100 # 조정필요
+        self.resistance_most_right = 2400 # 조정필요
     @property
     def steering_speed(self):
         return self._steering_speed
@@ -93,15 +98,59 @@ class MotorController:
         for motor in self.motors.values():
             motor.write(0x04, self.min_duty)
 
+    def set_smooth_steering(self, enabled=True):
+        """부드러운 조향 모드 설정"""
+        self.smooth_steering = enabled
+        print(f"[MOTOR_DEBUG] 부드러운 조향 모드: {'활성화' if enabled else '비활성화'}")
+
+    def set_auto_control_interval(self, interval):
+        """자동주행 제어 간격 설정 (초)"""
+        self.auto_control_interval = interval
+        print(f"[MOTOR_DEBUG] 자동주행 제어 간격: {interval:.3f}초")
+
+    def set_auto_duty_step(self, step_percent):
+        """자동주행 duty 증가량 설정 (퍼센트)"""
+        self.auto_duty_step = int(self.size * step_percent / 100)
+        print(f"[MOTOR_DEBUG] 자동주행 duty 증가량: {step_percent:.1f}% ({self.auto_duty_step})")
+
+    def get_steering_status(self):
+        """현재 조향 상태 정보 반환"""
+        return {
+            'smooth_steering': self.smooth_steering,
+            'auto_control_interval': self.auto_control_interval,
+            'auto_duty_step': self.auto_duty_step,
+            'current_duty': self.current_duty,
+            'steering_angle': self.steering_angle
+        }
+
     def right(self, steering_speed, control_mode=1):
         """우회전 제어"""
         print(f"[MOTOR_DEBUG] 우회전 제어: steering_speed={steering_speed}, control_mode={control_mode}")
         
         if control_mode == 1:  # 자율주행 모드
-            # duty 계산 개선: 최소 duty 보장
-            duty_percent = max(0.15, abs(steering_speed) / 100)  # 최소 15% 보장
-            duty = int(self.size * duty_percent)
-            print(f"[MOTOR_DEBUG] 자율주행 모드: duty_percent={duty_percent:.2f}, duty={duty}")
+            if self.smooth_steering:
+                # 점진적 증가 방식 적용
+                current_time = time.time()
+                if current_time - self.last_steering_time > self.auto_control_interval:
+                    # 목표 duty 계산
+                    target_duty_percent = abs(steering_speed) / 10
+                    target_duty = int(self.size * target_duty_percent)
+                    
+                    # 현재 duty에서 목표 duty로 점진적 증가
+                    if self.current_duty < target_duty:
+                        self.current_duty = min(target_duty, self.current_duty + self.auto_duty_step)
+                    elif self.current_duty > target_duty:
+                        self.current_duty = max(target_duty, self.current_duty - self.auto_duty_step)
+                    
+                    self.last_steering_time = current_time
+                
+                duty = self.current_duty
+                print(f"[MOTOR_DEBUG] 자율주행 모드: 점진적 duty={duty}, 목표 duty_percent={abs(steering_speed)/10:.2f}")
+            else:
+                # 기존 방식 (즉시 적용)
+                duty_percent = abs(steering_speed) / 10
+                duty = int(self.size * duty_percent)
+                print(f"[MOTOR_DEBUG] 자율주행 모드: 즉시 duty={duty}")
         else:  # 수동 주행 모드
             current_time = time.time()
             if current_time - self.last_steering_time > 0.05:
@@ -111,19 +160,43 @@ class MotorController:
             print(f"[MOTOR_DEBUG] 수동 주행 모드: duty={duty}")
             
         print(f"[MOTOR_DEBUG] motor_4(좌회전) 비활성화, motor_5(우회전) 활성화")
+        print("right duty")
+        print(duty)
+        
         self.motors['motor_4'].write(0x08, 0)  # valid  steering_left
         self.motors['motor_5'].write(0x08, 1)  # valid  steering_right
+        # self.motors['motor_5'].write(0x04, 480480)
         self.motors['motor_5'].write(0x04, duty)
+        
 
     def left(self, steering_speed, control_mode=1):
         """좌회전 제어"""
         print(f"[MOTOR_DEBUG] 좌회전 제어: steering_speed={steering_speed}, control_mode={control_mode}")
         
         if control_mode == 1:  # 자율주행 모드
-            # duty 계산 개선: 최소 duty 보장
-            duty_percent = max(0.15, abs(steering_speed) / 100)  # 최소 15% 보장
-            duty = int(self.size * duty_percent)
-            print(f"[MOTOR_DEBUG] 자율주행 모드: duty_percent={duty_percent:.2f}, duty={duty}")
+            if self.smooth_steering:
+                # 점진적 증가 방식 적용
+                current_time = time.time()
+                if current_time - self.last_steering_time > self.auto_control_interval:
+                    # 목표 duty 계산
+                    target_duty_percent = abs(steering_speed) / 10
+                    target_duty = int(self.size * target_duty_percent)
+                    
+                    # 현재 duty에서 목표 duty로 점진적 증가
+                    if self.current_duty < target_duty:
+                        self.current_duty = min(target_duty, self.current_duty + self.auto_duty_step)
+                    elif self.current_duty > target_duty:
+                        self.current_duty = max(target_duty, self.current_duty - self.auto_duty_step)
+                    
+                    self.last_steering_time = current_time
+                
+                duty = self.current_duty
+                print(f"[MOTOR_DEBUG] 자율주행 모드: 점진적 duty={duty}, 목표 duty_percent={abs(steering_speed)/10:.2f}")
+            else:
+                # 기존 방식 (즉시 적용)
+                duty_percent = abs(steering_speed) / 10
+                duty = int(self.size * duty_percent)
+                print(f"[MOTOR_DEBUG] 자율주행 모드: 즉시 duty={duty}")
         else:  # 수동 주행 모드
             current_time = time.time()
             if current_time - self.last_steering_time > 0.05:
@@ -142,9 +215,28 @@ class MotorController:
         print(f"[MOTOR_DEBUG] 중립 상태 유지: steering_speed={steering_speed}, control_mode={control_mode}")
         
         if control_mode == 1:  # 자율주행 모드
-            duty_percent = abs(steering_speed) / 100
-            duty = int(self.size * duty_percent)
-            print(f"[MOTOR_DEBUG] 자율주행 모드: duty_percent={duty_percent:.2f}, duty={duty}")
+            if self.smooth_steering:
+                # 점진적 감소 방식 적용
+                current_time = time.time()
+                if current_time - self.last_steering_time > self.auto_control_interval:
+                    # 목표 duty 계산 (중립 상태는 min_duty)
+                    target_duty = self.min_duty
+                    
+                    # 현재 duty에서 목표 duty로 점진적 감소
+                    if self.current_duty > target_duty:
+                        self.current_duty = max(target_duty, self.current_duty - self.auto_duty_step)
+                    elif self.current_duty < target_duty:
+                        self.current_duty = min(target_duty, self.current_duty + self.auto_duty_step)
+                    
+                    self.last_steering_time = current_time
+                
+                duty = self.current_duty
+                print(f"[MOTOR_DEBUG] 자율주행 모드: 점진적 중립 duty={duty}")
+            else:
+                # 기존 방식 (즉시 적용)
+                duty_percent = abs(steering_speed) / 10
+                duty = int(self.size * duty_percent)
+                print(f"[MOTOR_DEBUG] 자율주행 모드: 즉시 중립 duty={duty}")
         else:  # 수동 주행 모드
             self.current_duty = self.min_duty
             duty = self.current_duty
@@ -158,7 +250,7 @@ class MotorController:
 
     def set_left_speed(self, speed):
         """왼쪽 모터 속도 설정"""
-        duty_percent = abs(speed) / 100
+        duty_percent = abs(speed) / 50 # 조정필요
         duty = int(self.size * duty_percent)
         
         self.motors['motor_0'].write(0x04, duty)
@@ -173,7 +265,7 @@ class MotorController:
 
     def set_right_speed(self, speed):
         """오른쪽 모터 속도 설정"""
-        duty_percent = abs(speed) / 100
+        duty_percent = abs(speed) / 50 # 조정필요
         duty = int(self.size * duty_percent)
         
         self.motors['motor_3'].write(0x04, duty)
@@ -209,59 +301,68 @@ class MotorController:
         # 조향각의 크기에 비례하여 -7 ~ +7 범위로 매핑
         # 30도 = 7, 0도 = 0, -30도 = -7
         max_angle = 30.0
-        mapped_value = (angle / max_angle) * 7.0
-        mapped_value = max(-7.0, min(7.0, mapped_value))  # -7 ~ +7 범위 제한
+        mapped_value = (angle / max_angle) * 20.0
+        mapped_value = max(-20.0, min(20.0, mapped_value))  # -7 ~ +7 범위 제한
         return mapped_value
 
     def control_motors(self, angle=None, control_mode=1):
-        """모터 전체 제어"""
+        """모터 전체 제어 - 목표 각도에 직접 매핑"""
         # 디버깅 정보 추가
         print(f"[MOTOR_DEBUG] control_motors 호출: angle={angle}, control_mode={control_mode}")
         
-        mapped_resistance = self.map_value(
-            self.read_adc(),
-            self.resistance_most_right,
-            self.resistance_most_left,
-            -7, 7
-        )
-        
         if angle is not None:
-            target_angle = self.map_angle_to_range(angle)
-            # 조향각의 크기에 비례한 steering_speed 계산 (개선)
+            self.steering_angle = angle
+            print(f"[MOTOR_DEBUG] 입력 조향각: {angle:.2f}°")
+            print(f"[MOTOR_DEBUG] steering_angle 업데이트: {self.steering_angle:.2f}도")
+            
+            # 조향각의 크기에 비례한 steering_speed 계산
             angle_magnitude = abs(angle)
             max_angle = 30.0
             proportional_speed = (angle_magnitude / max_angle) * self.steering_speed
-            # 최소값을 20으로 증가하여 더 안정적인 조향 보장
-            proportional_speed = max(20, min(self.steering_speed, proportional_speed))
-            print(f"[MOTOR_DEBUG] 입력 조향각: {angle:.2f}° → 목표 범위: {target_angle}")
+            proportional_speed = max(10, min(self.steering_speed, proportional_speed))  # 최소 10, 최대 steering_speed
             print(f"[MOTOR_DEBUG] 조향각 크기: {angle_magnitude:.2f}° → 비례 속도: {proportional_speed:.1f}")
+            
+            # 목표 각도에 따라 직접 조향 결정
+            if abs(angle) <= 1.0:  # 거의 직진
+                print(f"[MOTOR_DEBUG] 직진 (각도: {angle:.2f}°)")
+                self.stay(proportional_speed, control_mode)
+            elif angle < -1.0:  # 좌회전 (음수)
+                print(f"[MOTOR_DEBUG] 좌회전 (각도: {angle:.2f}°)")
+                self.left(proportional_speed, control_mode)
+            else:  # 우회전 (양수, angle > 1.0)
+                print(f"[MOTOR_DEBUG] 우회전 (각도: {angle:.2f}°)")
+                self.right(proportional_speed, control_mode)
+                
         else:
+            # angle이 None인 경우 기존 피드백 제어 사용
+            mapped_resistance = self.map_value(
+                self.read_adc(),
+                self.resistance_most_right,
+                self.resistance_most_left,
+                -20, 20
+            )
+            
             target_angle = self.steering_angle
             proportional_speed = self.steering_speed
             print(f"[MOTOR_DEBUG] 기본 조향각 사용: {target_angle}")
+            print(f"[MOTOR_DEBUG] 현재 ADC 값: {self.read_adc()}, 매핑된 저항: {mapped_resistance:.2f}")
+            print(f"[MOTOR_DEBUG] 목표 각도: {target_angle}, 현재 저항: {mapped_resistance:.2f}")
             
-        print(f"[MOTOR_DEBUG] 현재 ADC 값: {self.read_adc()}, 매핑된 저항: {mapped_resistance:.2f}")
-        print(f"[MOTOR_DEBUG] 목표 각도: {target_angle}, 현재 저항: {mapped_resistance:.2f}")
-        
-        tolerance = 0.5
-        if abs(mapped_resistance - target_angle) <= tolerance:
-            print(f"[MOTOR_DEBUG] 중립 상태 유지 (차이: {abs(mapped_resistance - target_angle):.2f})")
-            self.stay(proportional_speed, control_mode)
-        elif mapped_resistance > target_angle:
-            print(f"[MOTOR_DEBUG] 좌회전 (차이: {mapped_resistance - target_angle:.2f})")
-            self.left(proportional_speed, control_mode)
-        else:
-            print(f"[MOTOR_DEBUG] 우회전 (차이: {target_angle - mapped_resistance:.2f})")
-            self.right(proportional_speed, control_mode)
-        
-        # 추가 디버깅 정보
-        print(f"[MOTOR_DEBUG] 최종 조향 제어 완료 - 속도: {proportional_speed:.1f}, 목표: {target_angle:.2f}, 현재: {mapped_resistance:.2f}")
-        print("-" * 50)
+            tolerance = 0.7 # 조정필요
+            if abs(mapped_resistance - target_angle) <= tolerance:
+                print(f"[MOTOR_DEBUG] 중립 상태 유지 (차이: {abs(mapped_resistance - target_angle):.2f})")
+                self.stay(proportional_speed, control_mode)
+            elif mapped_resistance > target_angle:
+                print(f"[MOTOR_DEBUG] 좌회전 (차이: {mapped_resistance - target_angle:.2f})")
+                self.left(proportional_speed, control_mode)
+            else:
+                print(f"[MOTOR_DEBUG] 우회전 (차이: {target_angle - mapped_resistance:.2f})")
+                self.right(proportional_speed, control_mode)
 
     def handle_manual_control(self):
         """수동 주행 모드에서의 키보드 입력 처리"""
         if keyboard.is_pressed('w'):
-            self.left_speed = min(self.left_speed + 1, 100)
+            self.left_speed = min(self.left_speed + 1, 100) 
             self.right_speed = min(self.right_speed + 1, 100)
             
         if keyboard.is_pressed('s'):
@@ -269,7 +370,7 @@ class MotorController:
             self.right_speed = max(self.right_speed - 1, -100)
             
         if keyboard.is_pressed('a'):
-            self.steering_angle = min(self.steering_angle - 1, 20)
+            self.steering_angle = min(self.steering_angle - 1, 20) 
             
         if keyboard.is_pressed('d'):
             self.steering_angle = max(self.steering_angle + 1, -20)

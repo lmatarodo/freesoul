@@ -17,6 +17,15 @@ MOTOR_ADDRESSES = {
 
 ADDRESS_RANGE = 0x10000
 
+# 초음파 센서 주소 설정 (주차 시스템용)
+ULTRASONIC_ADDRESSES = {
+    'ultrasonic_0': 0x00A0060000,  # 전방 우측
+    'ultrasonic_1': 0x00A0070000,  # 중간 좌측
+    'ultrasonic_2': 0x00A0080000,  # 중간 우측
+    'ultrasonic_3': 0x00A0090000,  # 후방 좌측
+    'ultrasonic_4': 0x00A00A0000   # 후방 우측
+}
+
 # YOLO configurations
 anchor_list = [10, 14, 23, 27, 37, 58, 81, 82, 135, 169, 344, 319]
 anchors = np.array(anchor_list).reshape(-1, 2)
@@ -24,8 +33,8 @@ classes_path = "../xmodel/lane_class.txt"
 
 # Kanayama 제어기 파라미터
 KANAYAMA_CONFIG = {
-    'K_y': 0.1,        # 횡방향 오차 게인
-    'K_phi': 0.3,      # 방향각 오차 게인
+    'K_y': 0.3,        # 횡방향 오차 게인
+    'K_phi': 0.9,      # 방향각 오차 게인
     'L': 0.5,          # 휠베이스 (m)
     'lane_width': 3.5, # 차선 폭 (m)
     'v_r': 20.0        # 기준 속도 (30.0에서 20.0으로 낮춤)

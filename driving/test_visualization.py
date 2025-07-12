@@ -455,7 +455,7 @@ def test_single_frame_visualization(dpu, camera_index=0, output_video_path="outp
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     fps = 10
     frame_size = (256*2, 256)
-    out = cv2.VideoWriter(output_video_path, fourcc, fps, frame_size)
+    out = cv2.VidㅅeoWriter(output_video_path, fourcc, fps, frame_size)
     
     frame_count = 0
     last_png_save_time = 0
