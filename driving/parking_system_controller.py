@@ -10,8 +10,7 @@ import numpy as np
 from threading import Lock
 from enum import Enum
 from config import (ULTRASONIC_ADDRESSES, ADDRESS_RANGE, 
-                   ULTRASONIC_REGISTERS, ULTRASONIC_STATUS, 
-                   ULTRASONIC_CONTROL, ULTRASONIC_CONFIG)
+                   ULTRASONIC_REGISTERS, ULTRASONIC_CONFIG)
 
 class ParkingPhase(Enum):
     """주차 단계 열거형"""
@@ -125,6 +124,10 @@ class ParkingSystemController:
         self.right_turn_after_increase_start_time = None
         self.additional_backward_start_time = None  # 추가 후진 시작 시간
         
+        # 센서 읽기 관련 변수
+        self.last_sensor_read_time = 0
+        self.sensor_read_interval = 0.1  # 센서 읽기 간격 (초)
+        
         # 수정 관련 변수
         self.correction_direction = 0  # 수정 방향 (1: 우회전, -1: 좌회전, 0: 미정)
         
@@ -217,27 +220,12 @@ class ParkingSystemController:
         for sensor_id, sensor in self.ultrasonic_sensors.items():
             if sensor is not None:
                 try:
-                    # 1. 센서 리셋
-                    sensor.write(ULTRASONIC_REGISTERS['CONTROL'], ULTRASONIC_CONTROL['RESET'])
-                    time.sleep(0.1)
-                    
-                    # 2. 센서 초기화
-                    sensor.write(ULTRASONIC_REGISTERS['CONTROL'], ULTRASONIC_CONTROL['INIT'])
-                    time.sleep(0.2)  # 초기화 대기
-                    
-                    # 3. 설정 레지스터 설정
-                    config_value = 0x01  # 기본 설정 (측정 간격, 타임아웃 등)
-                    sensor.write(ULTRASONIC_REGISTERS['CONFIG'], config_value)
-                    
-                    # 4. 초기화 확인
-                    status = sensor.read(ULTRASONIC_REGISTERS['STATUS'], 1)
-                    if status == ULTRASONIC_STATUS['READY']:
+                    # 센서 연결 상태 확인을 위해 거리 데이터 읽기 시도
+                    distance = self._read_single_sensor(sensor_id)
+                    if distance > 0:
                         connected_sensors.append(sensor_id)
-                        print(f"✅ {sensor_id} 센서 초기화 완료 (상태: READY)")
                     else:
                         failed_sensors.append(sensor_id)
-                        print(f"❌ {sensor_id} 센서 초기화 실패 (상태: {status:02X})")
-                        
                 except Exception as e:
                     failed_sensors.append(sensor_id)
                     print(f"❌ {sensor_id} 센서 초기화 오류: {e}")
@@ -253,75 +241,17 @@ class ParkingSystemController:
         
         return len(connected_sensors) > 0
 
-    def configure_sensor(self, sensor_id, measurement_interval=None, timeout_threshold=None):
+    def get_sensor_distance(self, sensor_id):
         """
-        센서 설정 변경
-        
-        Args:
-            sensor_id: 센서 ID
-            measurement_interval: 측정 간격 (초)
-            timeout_threshold: 타임아웃 임계값 (ms)
-        """
-        if sensor_id not in self.ultrasonic_sensors:
-            print(f"❌ {sensor_id} 센서가 존재하지 않음")
-            return False
-            
-        sensor = self.ultrasonic_sensors[sensor_id]
-        if sensor is None:
-            print(f"❌ {sensor_id} 센서가 연결되지 않음")
-            return False
-            
-        try:
-            # 설정 값 계산
-            config_value = 0x00
-            
-            if measurement_interval is not None:
-                # 측정 간격을 레지스터 값으로 변환 (예: 0.1초 = 0x01)
-                interval_value = int(measurement_interval * 10)  # 0.1초 단위
-                config_value |= (interval_value & 0x0F) << 4
-                
-            if timeout_threshold is not None:
-                # 타임아웃을 레지스터 값으로 변환 (예: 5000ms = 0x05)
-                timeout_value = int(timeout_threshold / 1000)  # 1000ms 단위
-                config_value |= (timeout_value & 0x0F)
-            
-            # 설정 레지스터에 쓰기
-            sensor.write(ULTRASONIC_REGISTERS['CONFIG'], config_value)
-            print(f"✅ {sensor_id} 센서 설정 변경 완료 (설정값: {config_value:02X})")
-            return True
-            
-        except Exception as e:
-            print(f"❌ {sensor_id} 센서 설정 변경 오류: {e}")
-            return False
-
-    def get_sensor_info(self, sensor_id):
-        """
-        센서 정보 조회
+        센서 거리 읽기
         
         Args:
             sensor_id: 센서 ID
             
         Returns:
-            dict: 센서 정보
+            float: 센서 거리 (cm)
         """
-        if sensor_id not in self.ultrasonic_sensors:
-            return None
-            
-        sensor = self.ultrasonic_sensors[sensor_id]
-        if sensor is None:
-            return None
-            
-        try:
-            info = {
-                'sensor_id': sensor_id,
-                'status': sensor.read(ULTRASONIC_REGISTERS['STATUS'], 1),
-                'config': sensor.read(ULTRASONIC_REGISTERS['CONFIG'], 1),
-                'echo_count': sensor.read(ULTRASONIC_REGISTERS['ECHO_COUNT'], 2)
-            }
-            return info
-        except Exception as e:
-            print(f"❌ {sensor_id} 센서 정보 조회 오류: {e}")
-            return None
+        return self._read_single_sensor(sensor_id)
 
     def test_sensors(self):
         """센서 테스트 - 모든 센서에서 거리 읽기"""
@@ -424,41 +354,11 @@ class ParkingSystemController:
                 
                 # 실제 센서 읽기 구현
                 try:
-                    # 1. 상태 확인 (센서가 준비되었는지)
-                    status = sensor.read(ULTRASONIC_REGISTERS['STATUS'], 1)
-                    if status != ULTRASONIC_STATUS['READY']:
-                        if status == ULTRASONIC_STATUS['BUSY']:
-                            print(f"⚠️ {sensor_id} 센서가 측정 중...")
-                        elif status == ULTRASONIC_STATUS['ERROR']:
-                            print(f"❌ {sensor_id} 센서 오류 상태")
-                        elif status == ULTRASONIC_STATUS['TIMEOUT']:
-                            print(f"⏰ {sensor_id} 센서 타임아웃")
-                        else:
-                            print(f"⚠️ {sensor_id} 센서가 준비되지 않음 (상태: {status:02X})")
-                        return 100
-                    
-                    # 2. 측정 시작
-                    sensor.write(ULTRASONIC_REGISTERS['CONTROL'], ULTRASONIC_CONTROL['START_MEASURE'])
-                    
-                    # 3. 측정 완료 대기 (최대 100ms)
-                    timeout_count = 0
-                    while timeout_count < 100:
-                        status = sensor.read(ULTRASONIC_REGISTERS['STATUS'], 1)
-                        if status == ULTRASONIC_STATUS['READY']:
-                            break
-                        time.sleep(0.001)  # 1ms 대기
-                        timeout_count += 1
-                    
-                    if timeout_count >= 100:
-                        print(f"⏰ {sensor_id} 측정 타임아웃")
-                        return 100
-                    
-                    # 4. 거리 데이터 읽기 (4바이트, mm 단위)
-                    distance_raw = sensor.read(ULTRASONIC_REGISTERS['DISTANCE_DATA'], 4)
-                    distance_mm = int.from_bytes(distance_raw, byteorder='little')
+                    # 거리 데이터 읽기 (직접 정수값으로 읽기)
+                    distance_mm = sensor.read(ULTRASONIC_REGISTERS['DISTANCE_DATA'])
                     distance_cm = distance_mm / 10.0  # mm를 cm로 변환
                     
-                    # 5. 유효한 거리 범위 확인
+                    # 유효한 거리 범위 확인
                     min_distance = ULTRASONIC_CONFIG['MIN_DISTANCE'] / 10.0  # mm를 cm로 변환
                     max_distance = ULTRASONIC_CONFIG['MAX_DISTANCE'] / 10.0  # mm를 cm로 변환
                     
@@ -649,9 +549,20 @@ class ParkingSystemController:
         
         with self._lock:
             try:
-                # 실제 센서 데이터 읽기
-                sensor_data = self.read_ultrasonic_sensors()
-                self.update_sensor_data(sensor_data)
+                # 센서 데이터 지속적 읽기 (시간 간격으로)
+                current_time = time.time()
+                if current_time - self.last_sensor_read_time >= self.sensor_read_interval:
+                    # 실제 센서 데이터 읽기
+                    sensor_data = self.read_ultrasonic_sensors()
+                    self.update_sensor_data(sensor_data)
+                    self.last_sensor_read_time = current_time
+                    
+                    # 센서 데이터 출력 (디버깅용)
+                    print(f"📏 [센서] FR:{sensor_data.get('front_right', 0):.1f}cm, "
+                          f"ML:{sensor_data.get('middle_left', 0):.1f}cm, "
+                          f"MR:{sensor_data.get('middle_right', 0):.1f}cm, "
+                          f"RL:{sensor_data.get('rear_left', 0):.1f}cm, "
+                          f"RR:{sensor_data.get('rear_right', 0):.1f}cm")
                 
                 # 현재 단계 정보 출력
                 print(f"🔄 [주차 단계] {self.current_phase.name} - {self.status_message}")
@@ -953,4 +864,22 @@ class ParkingSystemController:
             for key in self.sensor_flags:
                 self.sensor_flags[key] = False
             
-            print("🔄 시스템 리셋 완료") 
+            # 센서 읽기 시간 초기화
+            self.last_sensor_read_time = 0
+            
+            print("🔄 시스템 리셋 완료")
+    
+    def set_sensor_read_interval(self, interval):
+        """
+        센서 읽기 간격 설정
+        
+        Args:
+            interval: 센서 읽기 간격 (초)
+        """
+        with self._lock:
+            self.sensor_read_interval = interval
+            print(f"📏 센서 읽기 간격 설정: {interval:.2f}초")
+    
+    def get_sensor_read_interval(self):
+        """센서 읽기 간격 반환"""
+        return self.sensor_read_interval 

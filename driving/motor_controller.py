@@ -315,21 +315,34 @@ class MotorController:
             print(f"[MOTOR_DEBUG] 입력 조향각: {angle:.2f}°")
             print(f"[MOTOR_DEBUG] steering_angle 업데이트: {self.steering_angle:.2f}도")
             
-            # 조향각의 크기에 비례한 steering_speed 계산
+            # 조향 임계값 설정 - 직접 수정 가능
+            steering_threshold = 3.0  # 직접 수정: 3도 이상 벗어나면 조향 시작
+            
+            # 조향각의 크기에 비례한 steering_speed 계산 - 더 부드러운 제어
             angle_magnitude = abs(angle)
             max_angle = 30.0
-            proportional_speed = (angle_magnitude / max_angle) * self.steering_speed
-            proportional_speed = max(10, min(self.steering_speed, proportional_speed))  # 최소 10, 최대 steering_speed
+            
+            # 임계값 이하에서는 조향 강도를 줄임
+            if angle_magnitude <= steering_threshold:
+                # 3도 이내에서는 최소 강도
+                proportional_speed = 10
+            else:
+                # 3도 이상에서는 각도에 비례하여 강도 증가
+                effective_angle = angle_magnitude - steering_threshold  # 임계값 제외
+                max_effective_angle = max_angle - steering_threshold   # 최대 유효 각도
+                proportional_speed = (effective_angle / max_effective_angle) * self.steering_speed
+                proportional_speed = max(10, min(self.steering_speed, proportional_speed))  # 최소 10, 최대 steering_speed
+            
             print(f"[MOTOR_DEBUG] 조향각 크기: {angle_magnitude:.2f}° → 비례 속도: {proportional_speed:.1f}")
             
-            # 목표 각도에 따라 직접 조향 결정
-            if abs(angle) <= 1.0:  # 거의 직진
+            # 목표 각도에 따라 직접 조향 결정 - 임계값 조정
+            if abs(angle) <= steering_threshold:  # 거의 직진 (3도 이내)
                 print(f"[MOTOR_DEBUG] 직진 (각도: {angle:.2f}°)")
                 self.stay(proportional_speed, control_mode)
-            elif angle < -1.0:  # 좌회전 (음수)
+            elif angle < -steering_threshold:  # 좌회전 (음수, -3도 이하)
                 print(f"[MOTOR_DEBUG] 좌회전 (각도: {angle:.2f}°)")
                 self.left(proportional_speed, control_mode)
-            else:  # 우회전 (양수, angle > 1.0)
+            else:  # 우회전 (양수, +3도 이상)
                 print(f"[MOTOR_DEBUG] 우회전 (각도: {angle:.2f}°)")
                 self.right(proportional_speed, control_mode)
                 

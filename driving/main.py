@@ -213,7 +213,7 @@ def main():
         print("\n키보드 제어 안내:")
         print("Space: 주행 시작/정지")
         print("1/2: 자율주행/수동주행 모드 전환")
-        print("P: 주차 시스템 시작/정지")
+        print("3: 주차 모드 진입/종료")
         print("V: 시각화 켜기/끄기")
         if controller.control_mode == 2:
             print("\n수동 주행 제어:")
@@ -222,42 +222,87 @@ def main():
             print("R: 긴급 정지")
         print("Q: 프로그램 종료\n")
 
+        # 주차 모드 상태 변수
+        parking_mode = False
+        parking_start_time = None
+        last_sensor_print_time = 0  # 센서 데이터 출력 시간 제어용
+
         while True:
             # 키보드 입력 처리
             if keyboard.is_pressed('space'):
                 time.sleep(0.3)  # 디바운싱
-                if parking_controller.is_parking_active:
+                if parking_mode:
+                    # 주차 모드에서 Space 키: 주차 시작/정지
+                    if parking_controller.is_parking_active:
+                        parking_controller.stop_parking()
+                        print("주차 시스템 중지")
+                    else:
+                        parking_controller.start_parking()
+                        print("주차 시스템 시작")
+                elif parking_controller.is_parking_active:
                     print("주차 시스템이 실행 중입니다. 주차를 먼저 중지하세요.")
                 elif controller.is_running:
                     controller.stop_driving()
+                    print("자율주행 중지됨. 1/2/3번 키로 모드를 선택하세요.")
                 else:
                     controller.start_driving()
+                    print("자율주행 시작됨.")
             
-            elif keyboard.is_pressed('1') or keyboard.is_pressed('2'):
-                if parking_controller.is_parking_active:
-                    print("주차 시스템이 실행 중입니다. 주차를 먼저 중지하세요.")
-                else:
-                    prev_mode = controller.control_mode
-                    new_mode = 1 if keyboard.is_pressed('1') else 2
-                    if prev_mode != new_mode:
-                        controller.switch_mode(new_mode)
-                        if new_mode == 2:
-                            print("\n수동 주행 제어:")
-                            print("W/S: 전진/후진")
-                            print("A/D: 좌회전/우회전")
-                            print("R: 긴급 정지")
+            elif keyboard.is_pressed('1') or keyboard.is_pressed('2') or keyboard.is_pressed('3'):
+                if keyboard.is_pressed('1') or keyboard.is_pressed('2'):
+                    if parking_mode:
+                        # 주차 모드에서 1/2 키: 주행 모드 전환
+                        prev_mode = controller.control_mode
+                        new_mode = 1 if keyboard.is_pressed('1') else 2
+                        if prev_mode != new_mode:
+                            controller.switch_mode(new_mode)
+                            mode_name = "자율주행" if new_mode == 1 else "수동주행"
+                            print(f"주차 모드에서 {mode_name} 모드로 전환")
+                            if new_mode == 2:
+                                print("수동 주행 제어:")
+                                print("W/S: 전진/후진")
+                                print("A/D: 좌회전/우회전")
+                                print("R: 긴급 정지")
+                    elif parking_controller.is_parking_active:
+                        print("주차 시스템이 실행 중입니다. 주차를 먼저 중지하세요.")
+                    else:
+                        # 일반 모드에서 1/2 키: 주행 모드 전환
+                        prev_mode = controller.control_mode
+                        new_mode = 1 if keyboard.is_pressed('1') else 2
+                        if prev_mode != new_mode:
+                            controller.switch_mode(new_mode)
+                            mode_name = "자율주행" if new_mode == 1 else "수동주행"
+                            print(f"{mode_name} 모드로 전환됨.")
+                            if new_mode == 2:
+                                print("수동 주행 제어:")
+                                print("W/S: 전진/후진")
+                                print("A/D: 좌회전/우회전")
+                                print("R: 긴급 정지")
+                            print("Space 키로 주행을 시작하세요.")
+                elif keyboard.is_pressed('3'):
+                    if controller.is_running:
+                        print("자율주행이 실행 중입니다. 주행을 먼저 중지하세요.")
+                    elif parking_controller.is_parking_active:
+                        print("주차 시스템이 실행 중입니다. 주차를 먼저 중지하세요.")
+                    else:
+                        if not parking_mode:
+                            # 주차 모드 진입
+                            parking_mode = True
+                            parking_start_time = time.time()
+                            last_sensor_print_time = time.time()  # 센서 출력 시간 초기화
+                            print("🚗 주차 모드 진입!")
+                            print("주차 모드 제어:")
+                            print("- Space: 주차 시작/정지")
+                            print("- 1/2: 자율주행/수동주행 모드 전환")
+                            print("- 3: 주차 모드 종료")
+                            print("- Q: 프로그램 종료")
+                        else:
+                            # 주차 모드 종료
+                            parking_mode = False
+                            parking_start_time = None
+                            last_sensor_print_time = 0
+                            print("주차 모드 종료")
                 time.sleep(0.3)  # 디바운싱
-            
-            elif keyboard.is_pressed('p'):
-                time.sleep(0.3)  # 디바운싱
-                if controller.is_running:
-                    print("자율주행이 실행 중입니다. 주행을 먼저 중지하세요.")
-                elif parking_controller.is_parking_active:
-                    parking_controller.stop_parking()
-                    print("주차 시스템 중지")
-                else:
-                    parking_controller.start_parking()
-                    print("주차 시스템 시작")
             
             elif keyboard.is_pressed('v'):
                 time.sleep(0.3)  # 디바운싱
@@ -268,17 +313,57 @@ def main():
                 print("\n프로그램을 종료합니다.")
                 break
 
+            # 주차 모드에서 초음파 센서 데이터 지속적 출력 (1초마다)
+            if parking_mode:
+                current_time = time.time()
+                if current_time - last_sensor_print_time >= 1.0:  # 1초마다 출력
+                    try:
+                        # 센서 데이터 직접 읽기
+                        sensor_distances = {}
+                        for name, sensor in ultrasonic_sensors.items():
+                            try:
+                                distance = sensor.read(0)  # 거리값 읽기
+                                sensor_distances[name] = distance
+                            except Exception as e:
+                                sensor_distances[name] = 0.0
+                                print(f"센서 {name} 읽기 오류: {e}")
+                        
+                        # 센서 데이터 출력
+                        print(f"🔍 [초음파 센서] 전방우측: {sensor_distances.get('front_right', 0):.1f}cm, "
+                              f"중간우측: {sensor_distances.get('middle_right', 0):.1f}cm, "
+                              f"후방우측: {sensor_distances.get('rear_right', 0):.1f}cm")
+                        
+                        last_sensor_print_time = current_time
+                    except Exception as e:
+                        print(f"센서 데이터 읽기 오류: {e}")
+
             # 주차 시스템 실행 (활성화된 경우)
             if parking_controller.is_parking_active:
                 parking_controller.execute_parking_cycle()
                 parking_status = parking_controller.get_status()
-                print(f"주차 상태: {parking_status['status_message']} (단계: {parking_status['phase']})")
                 
-                # 센서 데이터 출력 (디버깅용)
+                # 주차 모드 상태 표시
+                if parking_mode:
+                    print(f"🚗 [주차 모드] {parking_status['status_message']} (단계: {parking_status['phase']})")
+                else:
+                    print(f"주차 상태: {parking_status['status_message']} (단계: {parking_status['phase']})")
+                
+                # 주차 실행 중일 때는 parking_controller에서 제공하는 센서 데이터도 출력
                 sensor_distances = parking_status['sensor_distances']
-                print(f"센서 거리 - 전방우측: {sensor_distances['front_right']:.1f}cm, "
+                print(f"📊 [주차 시스템] 전방우측: {sensor_distances['front_right']:.1f}cm, "
                       f"중간우측: {sensor_distances['middle_right']:.1f}cm, "
                       f"후방우측: {sensor_distances['rear_right']:.1f}cm")
+            elif parking_mode and not parking_controller.is_parking_active:
+                # 주차 모드이지만 주차가 실행되지 않은 경우 상태 표시
+                elapsed_time = time.time() - parking_start_time if parking_start_time else 0
+                print(f"🚗 [주차 모드] 대기 중... (Space 키로 주차 시작) - 경과시간: {elapsed_time:.1f}초")
+            elif not controller.is_running and not parking_mode:
+                # 아무것도 실행되지 않은 상태에서 모드 상태 표시 (5초마다)
+                current_time = time.time()
+                if not hasattr(controller, 'last_status_time') or current_time - controller.last_status_time > 5:
+                    mode_name = "자율주행" if controller.control_mode == 1 else "수동주행"
+                    print(f"📋 현재 모드: {mode_name} (Space 키로 주행 시작, 1/2/3번 키로 모드 변경)")
+                    controller.last_status_time = current_time
 
             # 프레임 처리
             ret, frame = cap.read()
@@ -310,6 +395,7 @@ def main():
             cv2.destroyAllWindows()
         controller.stop_driving()
         parking_controller.stop_parking()
+        print("모든 시스템이 정리되었습니다.")
 
 if __name__ == "__main__":
     main()
