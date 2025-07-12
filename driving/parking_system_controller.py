@@ -108,6 +108,9 @@ class ParkingSystemController:
         self.right_turn_after_increase_start_time = None
         self.additional_backward_start_time = None  # 추가 후진 시작 시간
         
+        # 수정 관련 변수
+        self.correction_direction = 0  # 수정 방향 (1: 우회전, -1: 좌회전, 0: 미정)
+        
         # 주차 설정
         self.parking_config = {
             'forward_speed': 30,      # 전진 속도 (0-100)
@@ -137,7 +140,7 @@ class ParkingSystemController:
             self.parking_completed = False
             self.current_phase = ParkingPhase.WAITING
             self.status_message = "주차 시작..."
-            self._reset_phase_states()
+            self._reset_phase_states() 
             print("🚗 주차 시스템 시작")
     
     def stop_parking(self):
@@ -154,6 +157,7 @@ class ParkingSystemController:
             self.phase_states[key] = False
         self.phase_start_time = None
         self.additional_backward_start_time = None
+        self.correction_direction = 0  # 수정 방향 초기화
     
     def update_sensor_data(self, sensor_data):
         """
@@ -295,14 +299,14 @@ class ParkingSystemController:
             self.status_message = "차량 정렬 완료! 주차 완료!"
             return True
         else:
-            # 차량 정렬을 위한 조향 조정
+            # 차량 정렬을 위한 조향 조정 - 시뮬레이션과 일치하도록 5도 사용
             if distance_diff > 0:
                 # front_right가 더 크면 왼쪽으로 조향
-                self.motor_controller.left(self.parking_config['steering_speed'])
+                self._set_steering_angle(-5)  # 시뮬레이션과 일치
                 self.status_message = "왼쪽 조향으로 정렬 중..."
             else:
                 # rear_right가 더 크면 오른쪽으로 조향
-                self.motor_controller.right(self.parking_config['steering_speed'])
+                self._set_steering_angle(5)  # 시뮬레이션과 일치
                 self.status_message = "오른쪽 조향으로 정렬 중..."
             
             return False
@@ -360,28 +364,26 @@ class ParkingSystemController:
         self.motor_controller.right_speed = -speed
     
     def _turn_left(self):
-        """좌회전"""
-        self.motor_controller.left(self.parking_config['steering_speed'])
+        """좌회전 - 설정된 각도로 조향"""
+        angle = self.parking_config['left_turn_angle']
+        print(f"[PARKING_DEBUG] 좌회전: {angle}도")
+        self.motor_controller.control_motors(angle, control_mode=1)
     
     def _turn_right(self):
-        """우회전"""
-        self.motor_controller.right(self.parking_config['steering_speed'])
+        """우회전 - 설정된 각도로 조향"""
+        angle = self.parking_config['right_turn_angle']
+        print(f"[PARKING_DEBUG] 우회전: {angle}도")
+        self.motor_controller.control_motors(angle, control_mode=1)
     
     def _straight_steering(self):
-        """직진 조향"""
-        self.motor_controller.stay(self.parking_config['steering_speed'])
+        """직진 조향 - 0도로 조향"""
+        print(f"[PARKING_DEBUG] 직진: 0도")
+        self.motor_controller.control_motors(0.0, control_mode=1)
     
     def _set_steering_angle(self, angle):
         """특정 각도로 조향 설정"""
-        if angle > 0:
-            # 우회전
-            self.motor_controller.right(self.parking_config['steering_speed'])
-        elif angle < 0:
-            # 좌회전
-            self.motor_controller.left(self.parking_config['steering_speed'])
-        else:
-            # 직진
-            self.motor_controller.stay(self.parking_config['steering_speed'])
+        print(f"[PARKING_DEBUG] 조향각 설정: {angle}도")
+        self.motor_controller.control_motors(angle, control_mode=1)
     
     def execute_parking_cycle(self):
         """주차 사이클 실행"""
@@ -484,9 +486,9 @@ class ParkingSystemController:
                 steering_reduction = (elapsed_time / 2.0) * self.parking_config['right_turn_angle']
                 current_steering = max(0, self.parking_config['right_turn_angle'] - steering_reduction)
                 
-                # 조향각에 따른 조향 설정
+                # 조향각에 따른 조향 설정 - 각도 기반으로 수정
                 if current_steering > 0:
-                    self._turn_right()  # 우회전 유지
+                    self._set_steering_angle(current_steering)  # 현재 조향각으로 설정
                 else:
                     self._straight_steering()  # 직진으로 전환
                 
@@ -529,16 +531,44 @@ class ParkingSystemController:
             self._set_phase(ParkingPhase.PARKING_COMPLETE_STOP)
     
     def _execute_correction_phase(self):
-        """수정 단계 실행"""
+        """수정 단계 실행 - 점진적 각도 변화 추가"""
         if not self.phase_states['correction_started']:
             self.correction_start_time = time.time()
             self.phase_states['correction_started'] = True
             self._move_forward()
             
+            # 수정 방향 결정 (한 번만)
             if "좌측으로 치우침" in self.status_message:
-                self._turn_right()
+                self.correction_direction = 1  # 우회전 (양수)
+                self.status_message = "우회전으로 수정 시작..."
             else:
-                self._turn_left()
+                self.correction_direction = -1  # 좌회전 (음수)
+                self.status_message = "좌회전으로 수정 시작..."
+        
+        # 점진적 각도 변화 적용
+        if self.correction_start_time is not None:
+            elapsed_time = time.time() - self.correction_start_time
+            correction_duration = self.parking_config['correction_duration']  # 2.0초
+            
+            if elapsed_time < correction_duration:
+                # 2초에 걸쳐 한쪽 끝에서 반대쪽 끝으로 점진적 이동 (시뮬레이션과 일치)
+                if self.correction_direction == 1:  # 우회전 (좌측으로 치우침)
+                    start_angle = self.parking_config['correction_angle']  # +15도
+                    end_angle = -self.parking_config['correction_angle']   # -15도
+                else:  # 좌회전 (우측으로 치우침)
+                    start_angle = -self.parking_config['correction_angle']  # -15도
+                    end_angle = self.parking_config['correction_angle']     # +15도
+                
+                progress_ratio = elapsed_time / correction_duration
+                current_angle = start_angle + (end_angle - start_angle) * progress_ratio
+                
+                # 현재 각도로 조향 설정
+                self._set_steering_angle(current_angle)
+                self.status_message = f"점진적 수정 중... ({current_angle:.1f}도)"
+            else:
+                # 수정 완료 - 직진으로 복귀
+                self._straight_steering()
+                self.status_message = "수정 완료! 직진으로 복귀..."
         
         if self._check_time_elapsed(self.correction_start_time, 
                                   self.parking_config['correction_duration']):
@@ -598,7 +628,8 @@ class ParkingSystemController:
             if not self.phase_states['right_turn_after_increase_started']:
                 self.right_turn_after_increase_start_time = time.time()
                 self.phase_states['right_turn_after_increase_started'] = True
-                self._turn_right()  # 우회전 시작
+                # 시뮬레이션과 일치하도록 20도로 설정
+                self._set_steering_angle(self.parking_config['final_right_turn_angle'])  # 20도
                 self.status_message = "오른쪽 조향 중..."
             
             # 우회전 완료 확인
